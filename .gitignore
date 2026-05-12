@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Local Bitcade runtime state (kept outside the repo in production)
+.env
+.env.*
+!.env.example
+/data/
+/instance/
+/uploads/
+/games/
+/thumbnails/
+/logs/
+*.db
+*.sqlite
+*.sqlite3
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
