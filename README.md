@@ -26,11 +26,26 @@ python -m bitcade.app
 
 ### Install on a Raspberry Pi
 
+<<<<<<< codex/implement-phase-1-with-install-strategy-leqxpk
+For Raspberry Pi OS Desktop or server-only installs where you will open a browser yourself:
+
+=======
+>>>>>>> main
 ```bash
 scripts/install-pi.sh
 ```
 
+<<<<<<< codex/implement-phase-1-with-install-strategy-leqxpk
+For Raspberry Pi OS Lite/headless installs with a connected monitor and keyboard, install the backend plus a tty1 kiosk service:
+
+```bash
+scripts/install-pi.sh --with-kiosk
+```
+
+The installer deploys code to `/opt/bitcade/app`, builds a Python virtual environment in `/opt/bitcade/venv`, stores local configuration in `/etc/bitcade/bitcade.env`, and keeps the SQLite database and game files in `/var/lib/bitcade`. Existing local data is preserved on reinstall. If `chromium-browser` is unavailable on your Raspberry Pi OS release, the installer falls back to the `chromium` package. The `--with-kiosk` option also installs minimal X packages and starts Chromium on tty1 through `bitcade-kiosk.service`.
+=======
 The installer deploys code to `/opt/bitcade/app`, builds a Python virtual environment in `/opt/bitcade/venv`, stores local configuration in `/etc/bitcade/bitcade.env`, and keeps the SQLite database and game files in `/var/lib/bitcade`. Existing local data is preserved on reinstall. If `chromium-browser` is unavailable on your Raspberry Pi OS release, the installer falls back to the `chromium` package.
+>>>>>>> main
 
 ## Resource files
 
