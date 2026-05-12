@@ -1,0 +1,21 @@
+{
+  "title": "Pixel Pong",
+  "authors": ["Bitcade Sample Team"],
+  "platform": "html",
+  "entry": "index.html",
+  "description": "A two-player shared-keyboard pong sample for cabinet testing.",
+  "license": "Included as a Bitcade sample for classroom use.",
+  "credits": ["Design and code by the Bitcade sample project"],
+  "players": { "min": 2, "max": 2, "simultaneous": true },
+  "input": {
+    "requiresKeyboard": true,
+    "requiresMouse": false,
+    "supportsGamepad": false,
+    "allowsSharedKeyboard": true
+  },
+  "controls": {
+    "player1": { "up": "W", "down": "S", "left": "A", "right": "D", "a": "F", "b": "G", "start": "R" },
+    "player2": { "up": "ArrowUp", "down": "ArrowDown", "left": "ArrowLeft", "right": "ArrowRight", "a": "Slash", "b": "Period", "start": "Enter" },
+    "system": { "exit": "Escape", "menu": "Escape" }
+  }
+}

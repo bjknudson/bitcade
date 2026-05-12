@@ -1,0 +1,3 @@
+body { margin: 0; display: grid; place-items: center; min-height: 100vh; background: #050816; color: white; font-family: system-ui, sans-serif; }
+canvas { max-width: 100%; border: 4px solid #ffcf5a; background: #111426; image-rendering: pixelated; }
+p { position: fixed; bottom: 0.75rem; }
