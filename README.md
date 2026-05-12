@@ -30,7 +30,7 @@ python -m bitcade.app
 scripts/install-pi.sh
 ```
 
-The installer deploys code to `/opt/bitcade/app`, builds a Python virtual environment in `/opt/bitcade/venv`, stores local configuration in `/etc/bitcade/bitcade.env`, and keeps the SQLite database and game files in `/var/lib/bitcade`. Existing local data is preserved on reinstall.
+The installer deploys code to `/opt/bitcade/app`, builds a Python virtual environment in `/opt/bitcade/venv`, stores local configuration in `/etc/bitcade/bitcade.env`, and keeps the SQLite database and game files in `/var/lib/bitcade`. Existing local data is preserved on reinstall. If `chromium-browser` is unavailable on your Raspberry Pi OS release, the installer falls back to the `chromium` package.
 
 ## Resource files
 

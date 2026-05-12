@@ -27,9 +27,24 @@ run_as_user() {
   fi
 }
 
+apt_package_has_candidate() {
+  local package="$1"
+  local candidate
+  candidate="$(apt-cache policy "${package}" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
+  [[ -n "${candidate}" && "${candidate}" != "(none)" ]]
+}
+
 if command -v apt-get >/dev/null 2>&1; then
   run_as_root apt-get update
-  run_as_root apt-get install -y python3 python3-venv python3-pip rsync chromium-browser
+  run_as_root apt-get install -y python3 python3-venv python3-pip rsync
+
+  if apt_package_has_candidate chromium-browser; then
+    run_as_root apt-get install -y chromium-browser
+  elif apt_package_has_candidate chromium; then
+    run_as_root apt-get install -y chromium
+  else
+    echo "Warning: neither chromium-browser nor chromium is available from apt. Install Chromium manually before using kiosk mode." >&2
+  fi
 fi
 
 run_as_root install -d -o "${INSTALL_USER}" -g "${INSTALL_USER}" "${APP_ROOT}" "${VENV_DIR}" "${DATA_DIR}" "${DATA_DIR}/games" "${DATA_DIR}/uploads" "${DATA_DIR}/thumbnails" "${DATA_DIR}/logs"

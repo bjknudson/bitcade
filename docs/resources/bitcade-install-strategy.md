@@ -37,7 +37,7 @@ scripts/install-pi.sh
 
 The installer:
 
-1. Installs Python, venv tooling, rsync, and Chromium when `apt-get` is available.
+1. Installs Python, venv tooling, rsync, and whichever Chromium package is available from apt (`chromium-browser` first, then `chromium`).
 2. Copies the repo to `/opt/bitcade/app` while excluding git and local runtime folders.
 3. Creates `/etc/bitcade/bitcade.env` only if it does not already exist.
 4. Creates `/var/lib/bitcade` folders only if they are missing.
@@ -48,4 +48,4 @@ Re-running the installer is safe for updates because it does not overwrite the e
 
 ## Kiosk launch
 
-`scripts/launch-kiosk.sh` opens Chromium at `http://localhost:8080/play` in kiosk mode. It can be connected to Raspberry Pi desktop autostart after the service is installed.
+`scripts/launch-kiosk.sh` opens Chromium at `http://localhost:8080/play` in kiosk mode. It searches for `chromium-browser`, `chromium`, then `x-www-browser`, or you can set `CHROMIUM_BIN`. It can be connected to Raspberry Pi desktop autostart after the service is installed.
