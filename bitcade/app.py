@@ -1038,12 +1038,14 @@ class BitcadeApp:
               </div>
             </article>""")
         body = """
+        <div class="arcade-menu">
         <section class="hero">
           <p class="eyebrow">Phase 1 browser arcade</p>
           <h1>Choose a local game</h1>
           <p>Approved games are served from local Bitcade storage and launch in the browser.</p>
         </section>
         <section class="grid" aria-label="Approved games">{cards}</section>
+        </div>
         """.format(cards="".join(cards) or '<p class="empty">No approved games yet.</p>')
         return html_page("Bitcade Play", body)
 
