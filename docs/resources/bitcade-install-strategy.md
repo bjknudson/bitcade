@@ -61,7 +61,7 @@ You can also use the equivalent environment flag:
 BITCADE_INSTALL_KIOSK=1 scripts/install-pi.sh
 ```
 
-The kiosk option adds the minimal X packages (`xserver-xorg`, `xinit`, `x11-xserver-utils`, and `unclutter`), writes and enables `bitcade-kiosk.service`, and disables `getty@tty1` for future boots. Reboot to start Chromium on tty1 with `startx`, or start `bitcade-kiosk.service` manually from SSH or another tty. The Bitcade backend still runs as `bitcade.service`; the kiosk service only owns the connected display.
+The kiosk option adds the minimal X packages (`xserver-xorg`, `xinit`, `x11-xserver-utils`, `x11-utils`, and `unclutter`), writes and enables `bitcade-kiosk.service`, and disables `getty@tty1` for future boots. Reboot to start Chromium on tty1 with `startx`, or start `bitcade-kiosk.service` manually from SSH or another tty. The Bitcade backend still runs as `bitcade.service`; the kiosk service only owns the connected display.
 
 Useful checks:
 
@@ -73,4 +73,4 @@ journalctl -u bitcade-kiosk.service -f
 
 ## Kiosk launch
 
-`scripts/launch-kiosk.sh` opens Chromium at `http://localhost:8080/play` in kiosk mode. It searches for `chromium-browser`, `chromium`, then `x-www-browser`, or you can set `CHROMIUM_BIN`. It disables X screen blanking when `xset` is available, hides the pointer when `unclutter` is available, and uses a dedicated Chromium profile when `CHROMIUM_USER_DATA_DIR` is set.
+`scripts/launch-kiosk.sh` opens Chromium at `http://localhost:8080/play` in kiosk mode. It searches for `chromium-browser`, `chromium`, then `x-www-browser`, or you can set `CHROMIUM_BIN`. It detects the active X resolution with `xrandr` or `xdpyinfo` and passes that size to Chromium; run the installer with `BITCADE_KIOSK_WINDOW_SIZE=1920x1080` to store a fixed service override, or set `CHROMIUM_WINDOW_SIZE=1920x1080` when launching manually. It disables X screen blanking when `xset` is available, hides the pointer when `unclutter` is available, and uses a dedicated Chromium profile when `CHROMIUM_USER_DATA_DIR` is set.

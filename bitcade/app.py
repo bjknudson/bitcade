@@ -251,7 +251,13 @@ def verify_password(password: str, stored_hash: str) -> bool:
         return False
 
 
-def html_page(title: str, body: str) -> bytes:
+def html_page(title: str, body: str, *, body_class: str = "", show_chrome: bool = True) -> bytes:
+    body_class_attr = f' class="{html.escape(body_class)}"' if body_class else ""
+    header = """
+  <header class="topbar">
+    <a class="brand" href="/play">Bitcade</a>
+    <nav><a href="/play">Play</a><a href="/admin">Admin</a></nav>
+  </header>""" if show_chrome else ""
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -260,14 +266,157 @@ def html_page(title: str, body: str) -> bytes:
   <title>{html.escape(title)}</title>
   <link rel="stylesheet" href="/static/bitcade.css">
 </head>
-<body>
-  <header class="topbar">
-    <a class="brand" href="/play">Bitcade</a>
-    <nav><a href="/play">Play</a><a href="/admin">Admin</a></nav>
-  </header>
+<body{body_class_attr}>{header}
   <main>{body}</main>
+  {KEYBOARD_NAV_SCRIPT}
 </body>
 </html>""".encode()
+
+
+KEYBOARD_NAV_SCRIPT = """
+  <script>
+  (() => {
+    const focusableSelector = [
+      "a[href]",
+      "button:not([disabled])",
+      "input:not([disabled]):not([type='hidden'])",
+      "select:not([disabled])",
+      "textarea:not([disabled])",
+      "iframe[tabindex]"
+    ].join(",");
+    const textInputTypes = new Set(["", "date", "datetime-local", "email", "month", "number", "password", "search", "tel", "text", "time", "url", "week"]);
+
+    const isTextEntry = (element) => {
+      if (!element) return false;
+      if (element.isContentEditable) return true;
+      if (element.tagName === "TEXTAREA" || element.tagName === "SELECT") return true;
+      return element.tagName === "INPUT" && textInputTypes.has((element.type || "").toLowerCase());
+    };
+
+    const isVisible = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+
+    const controls = () => Array.from(document.querySelectorAll(focusableSelector)).filter(isVisible);
+
+    const center = (rect) => ({
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2
+    });
+
+    const findNext = (direction) => {
+      const items = controls();
+      if (items.length === 0) return null;
+
+      const active = document.activeElement && items.includes(document.activeElement) ? document.activeElement : null;
+      if (!active) return items[0];
+
+      const origin = center(active.getBoundingClientRect());
+      let best = null;
+      let bestScore = Number.POSITIVE_INFINITY;
+
+      for (const item of items) {
+        if (item === active) continue;
+        const point = center(item.getBoundingClientRect());
+        const dx = point.x - origin.x;
+        const dy = point.y - origin.y;
+        let score = Number.POSITIVE_INFINITY;
+
+        if (direction === "ArrowDown" && dy > 4) score = dy * dy + dx * dx * 0.35;
+        if (direction === "ArrowUp" && dy < -4) score = dy * dy + dx * dx * 0.35;
+        if (direction === "ArrowRight" && dx > 4) score = dx * dx + dy * dy * 0.35;
+        if (direction === "ArrowLeft" && dx < -4) score = dx * dx + dy * dy * 0.35;
+
+        if (score < bestScore) {
+          bestScore = score;
+          best = item;
+        }
+      }
+
+      return best;
+    };
+
+    const focusControl = (element) => {
+      element.focus({ preventScroll: true });
+      element.scrollIntoView({ block: "nearest", inline: "nearest" });
+    };
+
+    window.addEventListener("keydown", (event) => {
+      if (isTextEntry(event.target)) return;
+
+      if (event.key.startsWith("Arrow")) {
+        const next = findNext(event.key);
+        if (next) {
+          event.preventDefault();
+          focusControl(next);
+        }
+        return;
+      }
+
+      if ((event.key === "Enter" || event.key === " ") && document.activeElement) {
+        const active = document.activeElement;
+        if (active.matches("a[href], button, input[type='submit'], input[type='button'], input[type='reset']")) {
+          event.preventDefault();
+          active.click();
+        }
+      }
+    });
+
+    window.addEventListener("DOMContentLoaded", () => {
+      if (document.body.classList.contains("game-page")) return;
+      const first = document.querySelector("[data-nav-start]") || controls()[0];
+      if (first && document.activeElement === document.body) first.focus({ preventScroll: true });
+    });
+  })();
+  </script>
+"""
+
+
+GAME_FIT_SCRIPT = """
+        <script>
+        (() => {
+          const frame = document.querySelector(".game-frame");
+          if (!frame) return;
+
+          const fitCanvas = () => {
+            const doc = frame.contentDocument;
+            if (!doc) return;
+
+            let style = doc.getElementById("bitcade-fit-style");
+            if (!style) {
+              style = doc.createElement("style");
+              style.id = "bitcade-fit-style";
+              style.textContent = "html,body{width:100%;height:100%;margin:0;overflow:hidden;}body{display:grid;place-items:center;}";
+              doc.head.appendChild(style);
+            }
+
+            const canvas = doc.querySelector("canvas");
+            if (!canvas) return;
+
+            const sourceWidth = Number(canvas.getAttribute("width")) || canvas.width || canvas.getBoundingClientRect().width || 800;
+            const sourceHeight = Number(canvas.getAttribute("height")) || canvas.height || canvas.getBoundingClientRect().height || 600;
+            const scale = Math.min(frame.clientWidth / sourceWidth, frame.clientHeight / sourceHeight);
+            const width = Math.floor(sourceWidth * scale);
+            const height = Math.floor(sourceHeight * scale);
+
+            canvas.style.display = "block";
+            canvas.style.width = `${width}px`;
+            canvas.style.height = `${height}px`;
+            canvas.style.maxWidth = "100vw";
+            canvas.style.maxHeight = "100vh";
+          };
+
+          frame.addEventListener("load", () => {
+            fitCanvas();
+            frame.focus({ preventScroll: true });
+          });
+          window.addEventListener("resize", fitCanvas);
+          setInterval(fitCanvas, 1000);
+        })();
+        </script>
+"""
 
 
 class BitcadeApp:
@@ -885,7 +1034,7 @@ class BitcadeApp:
                 <p class="byline">{html.escape(', '.join(game['authors']))}</p>
                 <p>{html.escape(game['description'])}</p>
                 <ul class="badges">{''.join(f'<li>{badge}</li>' for badge in badges)}</ul>
-                <a class="button" href="/play/{html.escape(game['id'])}">Launch game</a>
+                <a class="button" href="/play/{html.escape(game['id'])}" data-nav-start>Launch game</a>
               </div>
             </article>""")
         body = """
@@ -908,13 +1057,13 @@ class BitcadeApp:
             conn.execute("INSERT INTO play_sessions (game_id, started_at) VALUES (?, ?)", (game_id, now))
             game = dict(game)
         body = f"""
-        <section class="launch-header">
-          <div><p class="eyebrow">Now playing</p><h1>{html.escape(game['title'])}</h1></div>
-          <a class="button secondary" href="/play">Return to menu</a>
+        <section class="game-shell" aria-label="Now playing {html.escape(game['title'])}">
+          <iframe class="game-frame" title="{html.escape(game['title'])}" src="/game-files/{html.escape(game_id)}/{html.escape(game['entry_path'])}" tabindex="0" allowfullscreen></iframe>
+          <a class="game-return button secondary small" href="/play">Menu</a>
         </section>
-        <iframe class="game-frame" title="{html.escape(game['title'])}" src="/game-files/{html.escape(game_id)}/{html.escape(game['entry_path'])}"></iframe>
+        {GAME_FIT_SCRIPT}
         """
-        return self.response(start_response, "200 OK", html_page(f"Playing {game['title']}", body))
+        return self.response(start_response, "200 OK", html_page(f"Playing {game['title']}", body, body_class="game-page", show_chrome=False))
 
     def preview_game(self, start_response, game_id: str):
         with self.connect() as conn:
@@ -923,13 +1072,13 @@ class BitcadeApp:
                 return self.not_found(start_response)
             game = dict(game)
         body = f"""
-        <section class="launch-header">
-          <div><p class="eyebrow">Admin preview</p><h1>{html.escape(game['title'])}</h1></div>
-          <a class="button secondary" href="/admin">Return to admin</a>
+        <section class="game-shell" aria-label="Previewing {html.escape(game['title'])}">
+          <iframe class="game-frame" title="{html.escape(game['title'])}" src="/game-files/{html.escape(game_id)}/{html.escape(game['entry_path'])}" tabindex="0" allowfullscreen></iframe>
+          <a class="game-return button secondary small" href="/admin">Admin</a>
         </section>
-        <iframe class="game-frame" title="{html.escape(game['title'])}" src="/game-files/{html.escape(game_id)}/{html.escape(game['entry_path'])}"></iframe>
+        {GAME_FIT_SCRIPT}
         """
-        return self.response(start_response, "200 OK", html_page(f"Previewing {game['title']}", body))
+        return self.response(start_response, "200 OK", html_page(f"Previewing {game['title']}", body, body_class="game-page", show_chrome=False))
 
     def render_login(self, message: str = "", level: str = "info") -> bytes:
         alert = f'<p class="notice {html.escape(level)}">{html.escape(message)}</p>' if message else ""

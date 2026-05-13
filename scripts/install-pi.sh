@@ -11,6 +11,7 @@ KIOSK_SERVICE_FILE="/etc/systemd/system/bitcade-kiosk.service"
 INSTALL_USER="${BITCADE_USER:-${SUDO_USER:-$USER}}"
 INSTALL_KIOSK="${BITCADE_INSTALL_KIOSK:-0}"
 START_KIOSK_NOW="${BITCADE_START_KIOSK:-0}"
+KIOSK_WINDOW_SIZE="${BITCADE_KIOSK_WINDOW_SIZE:-}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUDO=""
 
@@ -27,7 +28,8 @@ Options:
 
 Environment overrides:
   BITCADE_APP_ROOT, BITCADE_VENV_DIR, BITCADE_DATA_DIR, BITCADE_ENV_DIR,
-  BITCADE_ENV_FILE, BITCADE_USER, BITCADE_INSTALL_KIOSK, BITCADE_START_KIOSK
+  BITCADE_ENV_FILE, BITCADE_USER, BITCADE_INSTALL_KIOSK, BITCADE_START_KIOSK,
+  BITCADE_KIOSK_WINDOW_SIZE
 USAGE
 }
 
@@ -109,7 +111,7 @@ if command -v apt-get >/dev/null 2>&1; then
   install_chromium
 
   if [[ "${INSTALL_KIOSK}" == "1" ]]; then
-    run_as_root apt-get install -y xserver-xorg xinit x11-xserver-utils unclutter
+    run_as_root apt-get install -y xserver-xorg xinit x11-xserver-utils x11-utils unclutter
   fi
 fi
 
@@ -180,6 +182,7 @@ User=${INSTALL_USER}
 WorkingDirectory=${APP_ROOT}
 Environment=BITCADE_URL=http://localhost:8080/play
 Environment=CHROMIUM_USER_DATA_DIR=${DATA_DIR}/chromium-profile
+${KIOSK_WINDOW_SIZE:+Environment=CHROMIUM_WINDOW_SIZE=${KIOSK_WINDOW_SIZE}}
 TTYPath=/dev/tty1
 TTYReset=yes
 TTYVHangup=yes
