@@ -50,7 +50,31 @@ Add:
 
 Outcome: games can be uploaded through authenticated `/admin`, validated, marked pending, previewed, and approved.
 
-## Phase 3: Better input support
+## Phase 3: Native Python/Pygame adapter
+
+Add:
+
+- `python-pygame` package platform.
+- Upload validation for trusted Python/Pygame zip packages.
+- Native local launch path that starts the game as a Python process on the
+  Bitcade display instead of loading it in a browser iframe.
+- Installer support for `python3-pygame`.
+- Python/Pygame upload guide.
+- Per-game process logs in the Bitcade runtime log directory.
+
+Implementation notes:
+
+- Keep this adapter local-only and teacher-approved. Python packages are code,
+  not static browser assets.
+- Do not install per-game dependencies from uploaded packages. The first
+  adapter supports the Python standard library plus the system pygame package.
+- Require `platform: "python-pygame"` and a `.py` entry file.
+- Continue blocking shell scripts, native apps, jars, and installer formats.
+- Launch the process with `DISPLAY=:0` so it opens on the kiosk display.
+
+Outcome: approved Python/Pygame projects can be uploaded, approved, and launched from Bitcade on the local machine.
+
+## Phase 4: Better input support
 
 Add:
 
@@ -60,9 +84,22 @@ Add:
 - Player 1 and player 2 mappings.
 - System exit/menu combo.
 
+Implementation notes:
+
+- Store a cabinet input profile in the local settings table.
+- Use the browser Gamepad API to detect connected controllers from the admin
+  input page.
+- Let controllers navigate Bitcade menu/admin controls with directional input
+  and an activate button.
+- For browser games, translate configured gamepad bindings into the key events
+  declared in each game's `bitcade.json` controls.
+- For native Python/Pygame games, leave controller reads to pygame for now; the
+  shared Bitcade profile still documents the expected cabinet mapping.
+- Hold the configured system combo to return from a browser game to the menu.
+
 Outcome: Bitcade can handle keyboard and controller-based cabinet setups more reliably.
 
-## Phase 4: Student publishing workflow
+## Phase 5: Student publishing workflow
 
 Add:
 
@@ -74,12 +111,11 @@ Add:
 
 Outcome: students can package and submit games with clearer feedback while teachers retain approval control.
 
-## Phase 5: Adapter system
+## Phase 6: Adapter system
 
-Add future adapters only after the browser workflow is stable:
+Add future adapters only after the browser and Python/Pygame workflows are stable:
 
 - Scratch/TurboWarp adapter.
-- Python/Pygame adapter.
 - Processing adapter.
 - Replit-export adapter.
 - Possible Godot HTML5 adapter.
@@ -90,7 +126,6 @@ Outcome: Bitcade can expand beyond static browser games without weakening the MV
 
 The following ideas are useful later but should not be first-build requirements:
 
-- Python/Pygame first-class support.
 - Processing first-class support.
 - Media project gallery mode.
 - Nginx or reverse proxy setup.

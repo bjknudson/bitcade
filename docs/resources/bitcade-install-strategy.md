@@ -38,7 +38,7 @@ scripts/install-pi.sh
 
 The base installer:
 
-1. Installs Python, venv tooling, rsync, and whichever Chromium package is available from apt (`chromium-browser` first, then `chromium`).
+1. Installs Python, venv tooling, pygame, rsync, and whichever Chromium package is available from apt (`chromium-browser` first, then `chromium`).
 2. Copies the repo to `/opt/bitcade/app` while excluding git and local runtime folders.
 3. Creates `/etc/bitcade/bitcade.env` only if it does not already exist.
 4. Creates `/var/lib/bitcade` folders only if they are missing.
@@ -61,7 +61,7 @@ You can also use the equivalent environment flag:
 BITCADE_INSTALL_KIOSK=1 scripts/install-pi.sh
 ```
 
-The kiosk option adds the minimal X packages (`xserver-xorg`, `xinit`, `x11-xserver-utils`, `x11-utils`, `matchbox-window-manager`, and `unclutter`), writes and enables `bitcade-kiosk.service`, and disables `getty@tty1` for future boots. Reboot to start Chromium on tty1 with `startx`, or start `bitcade-kiosk.service` manually from SSH or another tty. The Bitcade backend still runs as `bitcade.service`; the kiosk service only owns the connected display.
+The kiosk option adds the minimal X packages (`xserver-xorg`, `xinit`, `x11-xserver-utils`, `x11-utils`, `matchbox-window-manager`, and `unclutter`). It writes and enables `bitcade-kiosk.service`, and disables `getty@tty1` for future boots. Reboot to start Chromium on tty1 with `startx`, or start `bitcade-kiosk.service` manually from SSH or another tty. The Bitcade backend still runs as `bitcade.service`; the kiosk service only owns the connected display.
 
 Useful checks:
 

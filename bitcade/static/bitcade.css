@@ -66,6 +66,9 @@ p { color: var(--muted); font-size: 1.05rem; }
 .game-frame { display: block; width: 100vw; height: 100vh; border: 0; background: #000; }
 .game-return { position: fixed; top: 0.75rem; right: 0.75rem; z-index: 10; opacity: 0.72; }
 .game-return:is(:hover, :focus-visible) { opacity: 1; }
+.native-page { display: grid; place-items: center; }
+.native-launch { width: min(42rem, calc(100vw - 2rem)); padding: 2rem; text-align: center; }
+.native-launch h1 { font-size: clamp(2rem, 8vw, 5rem); }
 .admin-table { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: 1rem; background: var(--panel); }
 th, td { padding: 0.9rem 1rem; text-align: left; border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
 th { color: var(--accent); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; }
@@ -91,6 +94,9 @@ textarea { min-height: 7rem; resize: vertical; }
 .guide-body pre { overflow-x: auto; padding: 1rem; border-radius: 0.8rem; background: rgba(0, 0, 0, 0.36); }
 .guide-body code { white-space: pre; }
 .field-row { display: grid; grid-template-columns: repeat(2, minmax(8rem, 1fr)); gap: 1rem; }
+.input-map { grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); }
+.device-list { padding-left: 1.2rem; color: var(--muted); }
+.device-list li { margin: 0.35rem 0; }
 .checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 0.7rem; }
 .checks label { display: flex; align-items: center; gap: 0.5rem; }
 .checks input { width: auto; }

@@ -4,7 +4,8 @@ Bitcade is a local classroom arcade manager. A Raspberry Pi or similar host runs
 
 ## 1. First-version scope
 
-The first working version should focus on browser-based games only.
+The first working version should focus on browser-based games. Phase 3 adds a
+trusted local Python/Pygame adapter for teacher-approved projects.
 
 Support first:
 
@@ -15,7 +16,7 @@ Support first:
 - Bitsy
 - MakeCode Arcade HTML exports
 
-Do not build first-class Python, Processing, Java, or generic Replit support in the MVP. Those formats create extra launch, dependency, safety, fullscreen, and return-to-menu problems and should wait for a future adapter phase.
+Do not build first-class Processing, Java, native app, or generic Replit support in the MVP. Those formats create extra launch, dependency, safety, fullscreen, and return-to-menu problems and should wait for a future adapter phase.
 
 ## 2. User workflow
 
@@ -91,8 +92,8 @@ Bitcade Device
 │   └── play history
 ├── Runtime Adapters
 │   ├── browser game adapter
+│   ├── Python/Pygame adapter
 │   ├── future Scratch adapter
-│   ├── future Python/Pygame adapter
 │   ├── future Processing adapter
 │   └── future custom adapters
 ├── Input Layer
@@ -146,7 +147,7 @@ Use `/opt/bitcade/` as the deployment root.
 5. Scan for blocked file types.
 6. Read `bitcade.json`.
 7. Check player count and controls.
-8. Check for missing `index.html` or configured entry file.
+8. Check for missing `index.html`, Python `.py` entry, or configured entry file.
 9. Assign a game ID.
 10. Move the package to `/data/games/game-id/`.
 11. Add a SQLite record.
@@ -198,6 +199,10 @@ p5.js
 👥 2 Player   ⌨ Keyboard
 ```
 
+Controllers can navigate the menu through the browser Gamepad API. Directional
+input moves focus among links and buttons, and the primary action or start
+button activates the focused control.
+
 ## 10. Kiosk behavior
 
 On boot:
@@ -219,7 +224,45 @@ Recommended options:
 - Hold `Escape` for 3 seconds to return to the menu.
 - On a cabinet, hold `P1_START + P2_START` for 3 seconds to return to the menu.
 
-## 11. Admin interface
+## 11. Python/Pygame adapter
+
+The Python/Pygame adapter is for trusted local projects approved by a teacher.
+It launches a local Python process on the Bitcade machine display instead of
+rendering the game inside Chromium.
+
+Rules:
+
+- Require `platform: "python-pygame"` in `bitcade.json`.
+- Require a `.py` entry file.
+- Allow pygame and Python standard library use.
+- Do not install `requirements.txt`, `pyproject.toml`, `setup.py`, or `setup.cfg`
+  from uploaded packages.
+- Launch with `DISPLAY=:0` so the pygame window opens on the kiosk display.
+- Write process output to the Bitcade logs directory.
+
+This adapter is intentionally narrower than general Python support. It keeps the
+first native runtime useful for classroom pygame projects without allowing
+arbitrary dependency installation or native executable uploads.
+
+## 12. Input profiles
+
+Bitcade stores one cabinet input profile in local settings. The profile maps
+physical gamepad bindings such as `button:0`, `axis:0:-`, and `axis:1:+` to
+virtual Bitcade controls for player 1, player 2, and the system menu combo.
+
+The admin input page should:
+
+- Show connected controllers using the browser Gamepad API.
+- Save player 1 and player 2 mappings.
+- Save the system return-to-menu combo and hold duration.
+- Keep text fields keyboard-editable for setup.
+
+Browser games use the profile to translate gamepad input into the keyboard
+events declared in the game's `bitcade.json` controls. Python/Pygame games read
+controllers directly through pygame for now, but should use the same documented
+cabinet mapping.
+
+## 13. Admin interface
 
 Teacher/admin features should include:
 

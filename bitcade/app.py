@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 import zipfile
 from datetime import datetime, timezone
@@ -23,7 +24,9 @@ from wsgiref.simple_server import make_server
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SAMPLE_GAMES_DIR = REPO_ROOT / "samples" / "games"
 STATIC_DIR = REPO_ROOT / "bitcade" / "static"
-SUPPORTED_PLATFORMS = {"html", "p5js", "scratch", "twine", "bitsy", "makecode-arcade"}
+PYTHON_GAME_PLATFORM = "python-pygame"
+BROWSER_PLATFORMS = {"html", "p5js", "scratch", "twine", "bitsy", "makecode-arcade"}
+SUPPORTED_PLATFORMS = BROWSER_PLATFORMS | {PYTHON_GAME_PLATFORM}
 FORMAT_GUIDES = {
     "p5js": {
         "title": "p5.js",
@@ -31,6 +34,11 @@ FORMAT_GUIDES = {
         "doc_path": REPO_ROOT / "docs" / "resources" / "upload-guides" / "p5js.md",
         "template_path": REPO_ROOT / "docs" / "resources" / "upload-guides" / "templates" / "p5js-game-template",
         "template_filename": "bitcade-p5js-game-template.zip",
+    },
+    "python-pygame": {
+        "title": "Python/Pygame",
+        "summary": "Package a trusted local pygame project for launch on the Bitcade display.",
+        "doc_path": REPO_ROOT / "docs" / "resources" / "upload-guides" / "python-pygame.md",
     }
 }
 ALLOWED_PACKAGE_EXTENSIONS = {
@@ -50,14 +58,45 @@ ALLOWED_PACKAGE_EXTENSIONS = {
     ".webm",
     ".txt",
     ".md",
+    ".py",
+    ".ttf",
+    ".otf",
 }
-BLOCKED_PACKAGE_EXTENSIONS = {".exe", ".dmg", ".pkg", ".sh", ".command", ".bat", ".app", ".py", ".jar"}
+BLOCKED_PACKAGE_EXTENSIONS = {".exe", ".dmg", ".pkg", ".sh", ".command", ".bat", ".app", ".jar"}
 IGNORED_PACKAGE_NAMES = {".ds_store", "thumbs.db"}
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "bitcade"
 PASSWORD_HASH_ITERATIONS = 210_000
 SESSION_SECONDS = 8 * 60 * 60
+VIRTUAL_CONTROLS = ("up", "down", "left", "right", "a", "b", "start")
+DEFAULT_CABINET_PROFILE = {
+    "name": "Default gamepad",
+    "players": {
+        "1": {
+            "up": "axis:1:-",
+            "down": "axis:1:+",
+            "left": "axis:0:-",
+            "right": "axis:0:+",
+            "a": "button:0",
+            "b": "button:1",
+            "start": "button:9",
+        },
+        "2": {
+            "up": "axis:1:-",
+            "down": "axis:1:+",
+            "left": "axis:0:-",
+            "right": "axis:0:+",
+            "a": "button:0",
+            "b": "button:1",
+            "start": "button:9",
+        },
+    },
+    "system": {
+        "menuCombo": "button:8+button:9",
+        "holdSeconds": 2.0,
+    },
+}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS games (
@@ -167,9 +206,33 @@ def validate_metadata(metadata: dict[str, Any], game_dir: Path) -> None:
     entry = safe_package_path(metadata["entry"])
     if not (game_dir / entry).is_file():
         raise ValueError(f"{game_dir} entry file does not exist: {entry}")
+    entry_suffix = Path(entry).suffix.lower()
+    if metadata["platform"] == PYTHON_GAME_PLATFORM:
+        if entry_suffix != ".py":
+            raise ValueError(f"{game_dir} Python/Pygame entry must be a .py file")
+    elif entry_suffix != ".html":
+        raise ValueError(f"{game_dir} browser game entry must be an .html file")
     players = metadata["players"]
     if int(players.get("min", 0)) < 1 or int(players.get("max", 0)) < int(players.get("min", 0)):
         raise ValueError(f"{game_dir} has invalid player metadata")
+
+
+def validate_package_files_for_platform(game_dir: Path, metadata: dict[str, Any]) -> None:
+    platform = str(metadata["platform"])
+    python_files = sorted(path.relative_to(game_dir).as_posix() for path in game_dir.rglob("*.py") if path.is_file())
+    if platform != PYTHON_GAME_PLATFORM and python_files:
+        raise ValueError(f"Python files are only allowed in {PYTHON_GAME_PLATFORM} packages: {', '.join(python_files)}")
+    if platform == PYTHON_GAME_PLATFORM:
+        blocked_dependency_files = [
+            path.relative_to(game_dir).as_posix()
+            for path in game_dir.rglob("*")
+            if path.is_file() and path.name.lower() in {"requirements.txt", "pyproject.toml", "setup.py", "setup.cfg"}
+        ]
+        if blocked_dependency_files:
+            raise ValueError(
+                "Python/Pygame packages cannot install dependencies during upload. "
+                f"Remove dependency files: {', '.join(sorted(blocked_dependency_files))}"
+            )
 
 
 def slugify(value: str) -> str:
@@ -190,6 +253,31 @@ def bool_from_form(form: dict[str, list[str]], key: str) -> bool:
 
 def json_list_from_text(value: str) -> list[str]:
     return [line.strip() for line in value.splitlines() if line.strip()]
+
+
+def key_event_init(key_name: str) -> dict[str, Any]:
+    key_name = str(key_name).strip()
+    aliases = {
+        "Left Shift": ("Shift", "ShiftLeft"),
+        "Right Shift": ("Shift", "ShiftRight"),
+        "Shift": ("Shift", "ShiftLeft"),
+        "Space": (" ", "Space"),
+        "Enter": ("Enter", "Enter"),
+        "Escape": ("Escape", "Escape"),
+        "ArrowUp": ("ArrowUp", "ArrowUp"),
+        "ArrowDown": ("ArrowDown", "ArrowDown"),
+        "ArrowLeft": ("ArrowLeft", "ArrowLeft"),
+        "ArrowRight": ("ArrowRight", "ArrowRight"),
+    }
+    if key_name in aliases:
+        key, code = aliases[key_name]
+    elif len(key_name) == 1 and key_name.isalpha():
+        key = key_name.lower()
+        code = f"Key{key_name.upper()}"
+    else:
+        key = key_name
+        code = key_name
+    return {"key": key, "code": code}
 
 
 def render_markdown_reference(markdown: str) -> str:
@@ -269,6 +357,7 @@ def html_page(title: str, body: str, *, body_class: str = "", show_chrome: bool 
 <body{body_class_attr}>{header}
   <main>{body}</main>
   {KEYBOARD_NAV_SCRIPT}
+  {GAMEPAD_NAV_SCRIPT}
 </body>
 </html>""".encode()
 
@@ -374,6 +463,49 @@ KEYBOARD_NAV_SCRIPT = """
 """
 
 
+GAMEPAD_NAV_SCRIPT = """
+  <script>
+  (() => {
+    const navState = { up: false, down: false, left: false, right: false, activate: false, lastMove: 0 };
+
+    const sendKey = (key) => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+    };
+
+    const pressed = (gamepad, button) => Boolean(gamepad.buttons[button] && gamepad.buttons[button].pressed);
+
+    const poll = () => {
+      const gamepad = navigator.getGamepads ? Array.from(navigator.getGamepads()).find(Boolean) : null;
+      if (gamepad && !document.body.classList.contains("game-page")) {
+        const now = performance.now();
+        const states = {
+          up: (gamepad.axes[1] || 0) < -0.55 || pressed(gamepad, 12),
+          down: (gamepad.axes[1] || 0) > 0.55 || pressed(gamepad, 13),
+          left: (gamepad.axes[0] || 0) < -0.55 || pressed(gamepad, 14),
+          right: (gamepad.axes[0] || 0) > 0.55 || pressed(gamepad, 15),
+          activate: pressed(gamepad, 0) || pressed(gamepad, 9)
+        };
+
+        for (const [direction, key] of [["up", "ArrowUp"], ["down", "ArrowDown"], ["left", "ArrowLeft"], ["right", "ArrowRight"]]) {
+          if (states[direction] && (!navState[direction] || now - navState.lastMove > 260)) {
+            sendKey(key);
+            navState.lastMove = now;
+          }
+          navState[direction] = states[direction];
+        }
+
+        if (states.activate && !navState.activate) sendKey("Enter");
+        navState.activate = states.activate;
+      }
+      requestAnimationFrame(poll);
+    };
+
+    if ("getGamepads" in navigator) requestAnimationFrame(poll);
+  })();
+  </script>
+"""
+
+
 GAME_FIT_SCRIPT = """
         <script>
         (() => {
@@ -419,6 +551,100 @@ GAME_FIT_SCRIPT = """
 """
 
 
+def game_input_script(profile: dict[str, Any], controls: dict[str, Any], return_path: str) -> str:
+    keymap: dict[str, dict[str, Any]] = {}
+    for player_id, player_key in (("1", "player1"), ("2", "player2")):
+        player_controls = controls.get(player_key)
+        if not isinstance(player_controls, dict):
+            continue
+        for control in VIRTUAL_CONTROLS:
+            key_name = player_controls.get(control)
+            if key_name:
+                keymap[f"p{player_id}.{control}"] = key_event_init(str(key_name))
+
+    payload = {
+        "profile": profile,
+        "keymap": keymap,
+        "returnPath": return_path,
+    }
+    return f"""
+        <script>
+        (() => {{
+          const config = {json.dumps(payload)};
+          const frame = document.querySelector(".game-frame");
+          if (!frame || !("getGamepads" in navigator)) return;
+
+          const active = new Set();
+          let comboStartedAt = 0;
+
+          const bindingPressed = (gamepad, binding) => {{
+            if (!gamepad || !binding) return false;
+            const parts = String(binding).split(":");
+            if (parts[0] === "button") {{
+              const button = gamepad.buttons[Number(parts[1])];
+              return Boolean(button && button.pressed);
+            }}
+            if (parts[0] === "axis") {{
+              const value = gamepad.axes[Number(parts[1])] || 0;
+              return parts[2] === "-" ? value < -0.55 : value > 0.55;
+            }}
+            return false;
+          }};
+
+          const dispatch = (target, type, init) => {{
+            const eventInit = {{ ...init, bubbles: true, cancelable: true }};
+            target.dispatchEvent(new KeyboardEvent(type, eventInit));
+          }};
+
+          const setKey = (id, isDown, init) => {{
+            const doc = frame.contentDocument;
+            if (!doc) return;
+            const target = doc.activeElement || doc.body || doc;
+            if (isDown && !active.has(id)) {{
+              active.add(id);
+              dispatch(target, "keydown", init);
+            }} else if (!isDown && active.has(id)) {{
+              active.delete(id);
+              dispatch(target, "keyup", init);
+            }}
+          }};
+
+          const comboPressed = (gamepads) => {{
+            const combo = String(config.profile.system?.menuCombo || "").split("+").filter(Boolean);
+            if (combo.length === 0) return false;
+            return gamepads.some((gamepad) => gamepad && combo.every((binding) => bindingPressed(gamepad, binding)));
+          }};
+
+          const poll = () => {{
+            const gamepads = Array.from(navigator.getGamepads()).filter(Boolean);
+            const players = config.profile.players || {{}};
+
+            for (const [playerId, bindings] of Object.entries(players)) {{
+              const gamepad = gamepads[Number(playerId) - 1] || gamepads[0];
+              for (const [control, binding] of Object.entries(bindings || {{}})) {{
+                const id = `p${{playerId}}.${{control}}`;
+                const init = config.keymap[id];
+                if (init) setKey(id, bindingPressed(gamepad, binding), init);
+              }}
+            }}
+
+            if (comboPressed(gamepads)) {{
+              if (!comboStartedAt) comboStartedAt = performance.now();
+              const holdMs = Number(config.profile.system?.holdSeconds || 2) * 1000;
+              if (performance.now() - comboStartedAt >= holdMs) window.location.href = config.returnPath;
+            }} else {{
+              comboStartedAt = 0;
+            }}
+
+            requestAnimationFrame(poll);
+          }};
+
+          frame.addEventListener("load", () => requestAnimationFrame(poll), {{ once: true }});
+        }})();
+        </script>
+"""
+
+
 class BitcadeApp:
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         load_local_env()
@@ -429,6 +655,8 @@ class BitcadeApp:
         self.max_upload_bytes = int(os.environ.get("BITCADE_MAX_UPLOAD_BYTES", str(MAX_UPLOAD_BYTES)))
         self.default_admin_username = os.environ.get("BITCADE_DEFAULT_ADMIN_USERNAME", DEFAULT_ADMIN_USERNAME)
         self.default_admin_password = os.environ.get("BITCADE_DEFAULT_ADMIN_PASSWORD", DEFAULT_ADMIN_PASSWORD)
+        self.python_game_bin = os.environ.get("BITCADE_PYTHON_GAME_BIN", "/usr/bin/python3")
+        self.game_display = os.environ.get("BITCADE_GAME_DISPLAY", ":0")
         if config:
             self.data_dir = Path(config.get("BITCADE_DATA_DIR", self.data_dir)).expanduser().resolve()
             self.database = Path(config.get("BITCADE_DATABASE", self.database)).expanduser().resolve()
@@ -437,10 +665,13 @@ class BitcadeApp:
             self.max_upload_bytes = int(config.get("BITCADE_MAX_UPLOAD_BYTES", self.max_upload_bytes))
             self.default_admin_username = str(config.get("BITCADE_DEFAULT_ADMIN_USERNAME", self.default_admin_username))
             self.default_admin_password = str(config.get("BITCADE_DEFAULT_ADMIN_PASSWORD", self.default_admin_password))
+            self.python_game_bin = str(config.get("BITCADE_PYTHON_GAME_BIN", self.python_game_bin))
+            self.game_display = str(config.get("BITCADE_GAME_DISPLAY", self.game_display))
         self.games_dir = self.data_dir / "games"
         self.uploads_dir = self.data_dir / "uploads"
         self.thumbnails_dir = self.data_dir / "thumbnails"
         self.logs_dir = self.data_dir / "logs"
+        self.running_native_games: dict[str, subprocess.Popen[bytes]] = {}
         self.ensure_runtime_dirs()
         self.init_db()
         if self.seed_samples:
@@ -471,6 +702,17 @@ class BitcadeApp:
             conn.execute("INSERT INTO settings (key, value) VALUES ('admin_password_hash', ?)", (hash_password(self.default_admin_password),))
         if password_changed is None:
             conn.execute("INSERT INTO settings (key, value) VALUES ('admin_password_changed', '0')")
+        if conn.execute("SELECT value FROM settings WHERE key = 'cabinet_profile'").fetchone() is None:
+            conn.execute("INSERT INTO settings (key, value) VALUES ('cabinet_profile', ?)", (json.dumps(DEFAULT_CABINET_PROFILE),))
+
+    def cabinet_profile(self) -> dict[str, Any]:
+        try:
+            profile = json.loads(self.get_setting("cabinet_profile"))
+        except (json.JSONDecodeError, ValueError):
+            profile = DEFAULT_CABINET_PROFILE
+        if not isinstance(profile, dict):
+            return DEFAULT_CABINET_PROFILE
+        return profile
 
     def seed_sample_games(self) -> None:
         if not SAMPLE_GAMES_DIR.exists():
@@ -670,6 +912,9 @@ class BitcadeApp:
         if path == "/admin":
             query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
             return self.response(start_response, "200 OK", self.render_admin(first_form_value(query, "message"), first_form_value(query, "level", "info")))
+        if path == "/admin/input":
+            query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+            return self.response(start_response, "200 OK", self.render_input_settings(first_form_value(query, "message"), first_form_value(query, "level", "info")))
         if path.startswith("/admin/games/") and path.endswith("/preview"):
             game_id = safe_url_path(path.removeprefix("/admin/games/").removesuffix("/preview"))
             return self.preview_game(start_response, game_id)
@@ -690,6 +935,10 @@ class BitcadeApp:
                 return self.handle_change_password(environ, start_response)
             if path == "/admin/upload":
                 return self.handle_upload(environ, start_response)
+            if path == "/admin/input":
+                form = self.parse_urlencoded(environ)
+                self.update_input_settings(form)
+                return self.redirect(start_response, "/admin/input?message=Input%20settings%20updated.")
             if path.startswith("/admin/games/") and path.endswith("/status"):
                 game_id = safe_url_path(path.removeprefix("/admin/games/").removesuffix("/status"))
                 form = self.parse_urlencoded(environ)
@@ -814,8 +1063,10 @@ class BitcadeApp:
                 metadata = read_metadata(extracted_dir)
             else:
                 metadata = self.build_p5js_import_metadata(extracted_dir, upload_stem)
+                self.normalize_p5js_import(extracted_dir)
                 (extracted_dir / "bitcade.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
                 validate_metadata(metadata, extracted_dir)
+            validate_package_files_for_platform(extracted_dir, metadata)
             game_id = self.available_game_id(slugify(str(metadata["title"])))
             install_dir = self.games_dir / game_id
             shutil.move(str(extracted_dir), install_dir)
@@ -848,8 +1099,9 @@ class BitcadeApp:
                         top_levels.add(parts[0])
                 if not package_members:
                     raise ValueError("Uploaded zip is empty.")
-                if has_root_files and top_levels:
-                    raise ValueError("Zip package cannot mix root-level files and top-level folders.")
+                root_filenames = {PurePosixPath(path).name.lower() for path in package_members if len(PurePosixPath(path).parts) == 1}
+                if has_root_files and top_levels and "index.html" not in root_filenames:
+                    raise ValueError("Zip package cannot mix root-level files and top-level folders unless it is a p5.js editor export.")
                 if not has_root_files and len(top_levels) != 1:
                     raise ValueError("Zip package must contain exactly one top-level game folder.")
                 archive.extractall(temp_dir)
@@ -861,7 +1113,9 @@ class BitcadeApp:
             for member in package_members:
                 source = temp_dir / member
                 if source.is_file():
-                    shutil.move(str(source), game_dir / PurePosixPath(member).name)
+                    destination = game_dir / member
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(source), destination)
         else:
             game_dir = temp_dir / next(iter(top_levels))
         if not game_dir.is_dir():
@@ -871,16 +1125,53 @@ class BitcadeApp:
         return game_dir
 
     def looks_like_p5js_export(self, game_dir: Path) -> bool:
-        filenames = {path.name.lower() for path in game_dir.iterdir() if path.is_file()}
+        filenames = {path.name.lower() for path in game_dir.rglob("*") if path.is_file()}
         if "index.html" not in filenames or "sketch.js" not in filenames:
             return False
-        return bool({"p5.js", "p5.min.js", "p5.sound.min.js"} & filenames)
+        if {"p5.js", "p5.min.js", "p5.sound.min.js"} & filenames:
+            return True
+        index_text = (game_dir / "index.html").read_text(encoding="utf-8", errors="ignore").lower()
+        return "p5.js" in index_text or "p5.min.js" in index_text
+
+    def normalize_p5js_import(self, game_dir: Path) -> None:
+        index_path = game_dir / "index.html"
+        html_text = index_path.read_text(encoding="utf-8")
+        local_files = {path.name.lower(): path.relative_to(game_dir).as_posix() for path in game_dir.rglob("*") if path.is_file()}
+
+        def local_p5_path(source: str) -> str | None:
+            source_name = Path(source.split("?", 1)[0]).name.lower()
+            if "p5.sound" in source_name:
+                return local_files.get("p5.sound.min.js") or local_files.get("p5.sound.js")
+            if source_name in {"p5.js", "p5.min.js"} or re.search(r"/p5(?:\.min)?\.js$", source):
+                return local_files.get("p5.min.js") or local_files.get("p5.js")
+            return None
+
+        external_sources: list[str] = []
+
+        def replace_script(match: re.Match[str]) -> str:
+            prefix, source, suffix = match.groups()
+            if not source.startswith(("http://", "https://", "//")):
+                return match.group(0)
+            replacement = local_p5_path(source)
+            if replacement:
+                return f"{prefix}{replacement}{suffix}"
+            external_sources.append(source)
+            return match.group(0)
+
+        rewritten = re.sub(r'(<script\b[^>]*\bsrc=["\'])([^"\']+)(["\'][^>]*>)', replace_script, html_text, flags=re.IGNORECASE)
+        if external_sources:
+            raise ValueError(
+                "p5.js import references internet scripts that are not bundled locally: "
+                + ", ".join(sorted(set(external_sources)))
+            )
+        if rewritten != html_text:
+            index_path.write_text(rewritten, encoding="utf-8")
 
     def build_p5js_import_metadata(self, game_dir: Path, upload_stem: str) -> dict[str, Any]:
         if not (game_dir / "index.html").is_file():
             raise ValueError("p5.js export is missing index.html.")
         title = upload_stem.replace("-", " ").strip().title() or "Imported p5.js Game"
-        supports_sound = (game_dir / "p5.sound.min.js").is_file()
+        supports_sound = any(path.name.lower() in {"p5.sound.min.js", "p5.sound.js"} for path in game_dir.rglob("*") if path.is_file())
         credits = ["Imported from p5.js editor export"]
         if supports_sound:
             credits.append("Includes p5.sound library")
@@ -1042,7 +1333,7 @@ class BitcadeApp:
         <section class="hero">
           <p class="eyebrow">Phase 1 browser arcade</p>
           <h1>Choose a local game</h1>
-          <p>Approved games are served from local Bitcade storage and launch in the browser.</p>
+          <p>Approved games are served from local Bitcade storage and launch on the Bitcade machine.</p>
         </section>
         <section class="grid" aria-label="Approved games">{cards}</section>
         </div>
@@ -1058,12 +1349,16 @@ class BitcadeApp:
             conn.execute("UPDATE games SET play_count = play_count + 1, last_played = ? WHERE id = ?", (now, game_id))
             conn.execute("INSERT INTO play_sessions (game_id, started_at) VALUES (?, ?)", (game_id, now))
             game = dict(game)
+        if game["platform"] == PYTHON_GAME_PLATFORM:
+            return self.launch_native_python_game(start_response, game, "/play")
+        metadata = read_metadata(self.games_dir / game_id)
         body = f"""
         <section class="game-shell" aria-label="Now playing {html.escape(game['title'])}">
           <iframe class="game-frame" title="{html.escape(game['title'])}" src="/game-files/{html.escape(game_id)}/{html.escape(game['entry_path'])}" tabindex="0" allowfullscreen></iframe>
           <a class="game-return button secondary small" href="/play">Menu</a>
         </section>
         {GAME_FIT_SCRIPT}
+        {game_input_script(self.cabinet_profile(), metadata.get("controls", {}), "/play")}
         """
         return self.response(start_response, "200 OK", html_page(f"Playing {game['title']}", body, body_class="game-page", show_chrome=False))
 
@@ -1073,14 +1368,65 @@ class BitcadeApp:
             if game is None:
                 return self.not_found(start_response)
             game = dict(game)
+        if game["platform"] == PYTHON_GAME_PLATFORM:
+            return self.launch_native_python_game(start_response, game, "/admin", preview=True)
+        metadata = read_metadata(self.games_dir / game_id)
         body = f"""
         <section class="game-shell" aria-label="Previewing {html.escape(game['title'])}">
           <iframe class="game-frame" title="{html.escape(game['title'])}" src="/game-files/{html.escape(game_id)}/{html.escape(game['entry_path'])}" tabindex="0" allowfullscreen></iframe>
           <a class="game-return button secondary small" href="/admin">Admin</a>
         </section>
         {GAME_FIT_SCRIPT}
+        {game_input_script(self.cabinet_profile(), metadata.get("controls", {}), "/admin")}
         """
         return self.response(start_response, "200 OK", html_page(f"Previewing {game['title']}", body, body_class="game-page", show_chrome=False))
+
+    def launch_native_python_game(self, start_response, game: dict[str, Any], return_path: str, preview: bool = False):
+        game_id = str(game["id"])
+        existing = self.running_native_games.get(game_id)
+        if existing is not None and existing.poll() is None:
+            status_text = "Already running"
+        else:
+            self.running_native_games.pop(game_id, None)
+            game_dir = self.games_dir / game_id
+            entry_path = game_dir / safe_package_path(str(game["entry_path"]))
+            log_path = self.logs_dir / f"{game_id}.log"
+            env = os.environ.copy()
+            env.setdefault("DISPLAY", self.game_display)
+            env.setdefault("SDL_VIDEO_CENTERED", "1")
+            env.setdefault("PYTHONUNBUFFERED", "1")
+            try:
+                with log_path.open("ab") as log_file:
+                    process = subprocess.Popen(
+                        [self.python_game_bin, str(entry_path)],
+                        cwd=game_dir,
+                        env=env,
+                        stdout=log_file,
+                        stderr=subprocess.STDOUT,
+                        close_fds=True,
+                    )
+            except OSError as error:
+                body = f"""
+                <section class="native-launch">
+                  <p class="eyebrow">Launch failed</p>
+                  <h1>{html.escape(game['title'])}</h1>
+                  <p>{html.escape(str(error))}</p>
+                  <a class="button" href="{html.escape(return_path)}" data-nav-start>Return</a>
+                </section>
+                """
+                return self.response(start_response, "500 Internal Server Error", html_page("Python Launch Failed", body, body_class="game-page native-page", show_chrome=False))
+            self.running_native_games[game_id] = process
+            status_text = "Launching"
+        body = f"""
+        <section class="native-launch">
+          <p class="eyebrow">{'Admin preview' if preview else 'Now playing'}</p>
+          <h1>{html.escape(game['title'])}</h1>
+          <p>{html.escape(status_text)} as a local Python/Pygame process on the Bitcade display.</p>
+          <p>When the game exits, use the menu button to return to Bitcade.</p>
+          <a class="button" href="{html.escape(return_path)}" data-nav-start>Return</a>
+        </section>
+        """
+        return self.response(start_response, "200 OK", html_page(f"Playing {game['title']}", body, body_class="game-page native-page", show_chrome=False))
 
     def render_login(self, message: str = "", level: str = "info") -> bytes:
         alert = f'<p class="notice {html.escape(level)}">{html.escape(message)}</p>' if message else ""
@@ -1226,7 +1572,7 @@ class BitcadeApp:
           <p class="eyebrow">Phase 2 admin</p>
           <h1>Manage games</h1>
           <p>Upload a Bitcade zip, validate it, preview it, then approve it for the arcade menu.</p>
-          <p><a href="/admin/change-password">Change password</a> · <a href="/admin/logout">Log out</a></p>
+          <p><a href="/admin/input">Input settings</a> · <a href="/admin/change-password">Change password</a> · <a href="/admin/logout">Log out</a></p>
         </section>
         {alert}
         <section class="panel">
@@ -1244,6 +1590,103 @@ class BitcadeApp:
         </table>
         """
         return html_page("Bitcade Admin", body)
+
+    def render_input_settings(self, message: str = "", level: str = "info") -> bytes:
+        profile = self.cabinet_profile()
+        players = profile.get("players", {})
+        system = profile.get("system", {})
+        alert = f'<p class="notice {html.escape(level)}">{html.escape(message)}</p>' if message else ""
+
+        def value(player: str, control: str) -> str:
+            player_profile = players.get(player, {}) if isinstance(players, dict) else {}
+            if not isinstance(player_profile, dict):
+                return ""
+            return html.escape(str(player_profile.get(control, "")))
+
+        def player_fields(player: str) -> str:
+            labels = []
+            for control in VIRTUAL_CONTROLS:
+                labels.append(f'<label>{player.upper()} {control.title()} <input name="{player}_{control}" value="{value(player[-1], control)}"></label>')
+            return "".join(labels)
+
+        body = f"""
+        <section class="hero compact">
+          <p class="eyebrow">Phase 4 input</p>
+          <h1>Input settings</h1>
+          <p>Configure cabinet mappings and check connected controllers from this browser.</p>
+        </section>
+        {alert}
+        <section class="panel">
+          <h2>Controller detection</h2>
+          <p id="gamepad-status">Press a button on a connected controller.</p>
+          <ul id="gamepad-list" class="device-list"></ul>
+        </section>
+        <form class="panel edit-form" action="/admin/input" method="post">
+          <label>Profile name <input name="profile_name" value="{html.escape(str(profile.get('name', 'Default gamepad')))}"></label>
+          <h2>Player 1</h2>
+          <div class="field-row input-map">{player_fields('p1')}</div>
+          <h2>Player 2</h2>
+          <div class="field-row input-map">{player_fields('p2')}</div>
+          <h2>System</h2>
+          <div class="field-row">
+            <label>Menu combo <input name="menu_combo" value="{html.escape(str(system.get('menuCombo', 'button:8+button:9')))}"></label>
+            <label>Hold seconds <input type="number" step="0.25" min="0.5" max="10" name="hold_seconds" value="{html.escape(str(system.get('holdSeconds', 2.0)))}"></label>
+          </div>
+          <p>Bindings use <code>button:N</code>, <code>axis:N:-</code>, or <code>axis:N:+</code>. Combos join bindings with <code>+</code>.</p>
+          <div class="form-actions">
+            <button class="button" type="submit">Save input profile</button>
+            <a class="button secondary" href="/admin">Back to admin</a>
+          </div>
+        </form>
+        <script>
+        (() => {{
+          const status = document.getElementById("gamepad-status");
+          const list = document.getElementById("gamepad-list");
+          const render = () => {{
+            const gamepads = navigator.getGamepads ? Array.from(navigator.getGamepads()).filter(Boolean) : [];
+            list.innerHTML = "";
+            if (gamepads.length === 0) {{
+              status.textContent = "Press a button on a connected controller.";
+            }} else {{
+              status.textContent = `${{gamepads.length}} controller${{gamepads.length === 1 ? "" : "s"}} detected.`;
+            }}
+            for (const gamepad of gamepads) {{
+              const activeButtons = gamepad.buttons
+                .map((button, index) => button.pressed ? `button:${{index}}` : "")
+                .filter(Boolean)
+                .join(", ");
+              const activeAxes = gamepad.axes
+                .map((axis, index) => Math.abs(axis) > 0.55 ? `axis:${{index}}:${{axis < 0 ? "-" : "+"}}` : "")
+                .filter(Boolean)
+                .join(", ");
+              const item = document.createElement("li");
+              item.textContent = `${{gamepad.index}}: ${{gamepad.id}}${{activeButtons || activeAxes ? ` - ${{[activeButtons, activeAxes].filter(Boolean).join(", ")}}` : ""}}`;
+              list.appendChild(item);
+            }}
+            requestAnimationFrame(render);
+          }};
+          if ("getGamepads" in navigator) requestAnimationFrame(render);
+        }})();
+        </script>
+        """
+        return html_page("Input Settings", body)
+
+    def update_input_settings(self, form: dict[str, list[str]]) -> None:
+        hold_seconds = float(first_form_value(form, "hold_seconds", "2"))
+        if hold_seconds < 0.5 or hold_seconds > 10:
+            raise ValueError("Hold seconds must be between 0.5 and 10.")
+        profile = {
+            "name": first_form_value(form, "profile_name", "Default gamepad").strip() or "Default gamepad",
+            "players": {
+                "1": {control: first_form_value(form, f"p1_{control}").strip() for control in VIRTUAL_CONTROLS},
+                "2": {control: first_form_value(form, f"p2_{control}").strip() for control in VIRTUAL_CONTROLS},
+            },
+            "system": {
+                "menuCombo": first_form_value(form, "menu_combo", "button:8+button:9").strip(),
+                "holdSeconds": hold_seconds,
+            },
+        }
+        self.set_setting("cabinet_profile", json.dumps(profile))
 
     def render_status_actions(self, game: dict[str, Any]) -> str:
         actions = []

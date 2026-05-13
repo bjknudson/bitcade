@@ -24,6 +24,12 @@ is missing, Bitcade treats the upload as a p5.js editor export, wraps the files
 into an installed game folder, creates draft metadata, and marks the game
 pending.
 
+If the export includes folders such as `assets/` or `libraries/`, Bitcade keeps
+those folders intact so relative asset paths continue to work. If `index.html`
+points at a p5.js CDN but the zip includes a local `p5.js` or `p5.min.js`,
+Bitcade rewrites the script tag to use the bundled local file. If no local p5
+library is bundled, the upload is rejected because the game would fail offline.
+
 After upload, open Edit and fill in:
 
 - Game title.
@@ -184,6 +190,7 @@ Upload the zip from the Bitcade admin page. The game will be installed as pendin
 - `bitcade.json` is missing and the zip does not look like a p5.js editor export.
 - `platform` is not exactly `p5js`.
 - `index.html` loads p5.js from the internet instead of a local file.
+- The p5.js library is not included in the zip.
 - Asset paths point outside the game folder.
 - The zip mixes root-level files with top-level folders.
 - The game uses a blocked file type such as `.py`, `.sh`, or `.exe`.

@@ -4,9 +4,9 @@ This document defines the first Bitcade package contract. It is the agreement be
 
 ## 1. Core rule
 
-A Bitcade game must run locally from an `index.html` file without internet access.
+A Bitcade browser game must run locally from an `index.html` file without internet access. A Python/Pygame game must run locally from a declared `.py` entry file on the Bitcade machine.
 
-The first supported Bitcade packages are static browser games. Python, Processing, Java, native apps, and general Replit projects are future adapter targets, not first-version package types.
+The first supported Bitcade packages are static browser games. Phase 3 adds trusted Python/Pygame packages as a native local adapter. Processing, Java, native apps, and general Replit projects are future adapter targets, not current package types.
 
 ## 2. Package format
 
@@ -22,12 +22,23 @@ my-game/
 └── assets/
 ```
 
+Python/Pygame packages use the same zip shape but replace the browser entry
+with a Python file:
+
+```text
+my-pygame-game/
+├── bitcade.json
+├── main.py
+└── assets/
+```
+
 ### Required files
 
 | File | Required | Purpose |
 | --- | --- | --- |
 | `bitcade.json` | Yes | Bitcade metadata, player support, and control mapping. |
-| `index.html` | Yes | Browser entry point for the game. |
+| `index.html` | Browser games only | Browser entry point for the game. |
+| `main.py` or another `.py` entry | Python/Pygame only | Native Python entry point for the game. |
 | `thumbnail.png` | Preferred | Arcade menu artwork. Use a default placeholder if omitted in early builds. |
 
 ### Student export requirement
@@ -59,8 +70,9 @@ Supported platform values for the first version are:
 | `twine` | Twine HTML export. |
 | `bitsy` | Bitsy HTML export. |
 | `makecode-arcade` | MakeCode Arcade HTML export. |
+| `python-pygame` | Trusted local Python/Pygame project launched on the Bitcade machine. |
 
-Future adapters may add values such as `python-pygame`, `processing`, `replit-export`, or `godot-html5`.
+Future adapters may add values such as `processing`, `replit-export`, or `godot-html5`.
 
 Upload pages should link to a reference guide for each supported format as those
 guides become available. The first guide covers packaging p5.js games for local,
@@ -190,6 +202,11 @@ SYSTEM_MENU
 
 Each physical device maps to Bitcade controls, and each game maps Bitcade controls to the keyboard or input events expected by the game. This keeps the cabinet setup consistent even when student games use different keys internally.
 
+The cabinet mapping is saved in Bitcade admin input settings. Browser games can
+receive translated key events from the launcher when a controller is used.
+Python/Pygame games should read controller input through pygame and follow the
+same virtual-control expectations.
+
 ## 8. Control mapping format
 
 Use `controls.player1`, `controls.player2`, and `controls.system` to describe the keys the game expects.
@@ -217,7 +234,7 @@ For one-player games, `controls.player2` may be omitted. System controls should 
 
 ## 9. Allowed and blocked file types
 
-The first version allows static browser-game assets only.
+Browser packages allow static browser-game assets only. Python/Pygame packages additionally allow `.py` files, but Bitcade does not install per-game Python dependencies from uploaded packages.
 
 ### Allowed extensions
 
@@ -238,6 +255,9 @@ The first version allows static browser-game assets only.
 .webm
 .txt
 .md
+.py
+.ttf
+.otf
 ```
 
 ### Blocked extensions
@@ -250,11 +270,10 @@ The first version allows static browser-game assets only.
 .command
 .bat
 .app
-.py
 .jar
 ```
 
-Blocked types may be supported later only through explicit advanced adapters.
+Blocked types may be supported later only through explicit advanced adapters. Python/Pygame packages must not include `requirements.txt`, `pyproject.toml`, `setup.py`, or `setup.cfg`; the Pi installer provides the supported pygame runtime.
 
 ## 10. Validation requirements
 

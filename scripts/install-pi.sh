@@ -108,7 +108,7 @@ install_chromium() {
 
 if command -v apt-get >/dev/null 2>&1; then
   run_as_root apt-get update
-  run_as_root apt-get install -y python3 python3-venv python3-pip rsync
+  run_as_root apt-get install -y python3 python3-venv python3-pip python3-pygame rsync
   install_chromium
 
   if [[ "${INSTALL_KIOSK}" == "1" ]]; then
@@ -143,6 +143,8 @@ print(secrets.token_urlsafe(32))
 PY
 )
 BITCADE_SEED_SAMPLES=1
+BITCADE_GAME_DISPLAY=:0
+BITCADE_PYTHON_GAME_BIN=/usr/bin/python3
 ENV
   run_as_root chmod 640 "${ENV_FILE}"
 fi
@@ -160,6 +162,8 @@ Type=simple
 User=${INSTALL_USER}
 WorkingDirectory=${APP_ROOT}
 EnvironmentFile=${ENV_FILE}
+Environment=BITCADE_GAME_DISPLAY=:0
+Environment=BITCADE_PYTHON_GAME_BIN=/usr/bin/python3
 ExecStart=${VENV_DIR}/bin/python -m bitcade.app
 Restart=on-failure
 RestartSec=3

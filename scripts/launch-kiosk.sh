@@ -151,6 +151,10 @@ if command -v xset >/dev/null 2>&1; then
   xset s noblank || true
 fi
 
+if command -v xhost >/dev/null 2>&1; then
+  xhost "+SI:localuser:$(id -un)" >/dev/null 2>&1 || true
+fi
+
 if command -v unclutter >/dev/null 2>&1; then
   unclutter -idle 0.5 -root &
 fi
