@@ -34,6 +34,19 @@ my-game/
 
 Students should export or wrap projects so the package can be opened from `index.html` and played offline. Any required libraries, images, sounds, fonts, or generated files must be included inside the package.
 
+### Format-specific importers
+
+Some classroom tools export a playable browser game but do not include
+`bitcade.json`. Bitcade may provide format-specific admin importers for those
+cases. The first importer accepts p5.js editor zip downloads with root-level
+files such as `index.html`, `sketch.js`, `style.css`, `p5.js`, and
+`p5.sound.min.js`. Bitcade wraps that upload into an installed game folder,
+creates draft metadata, and leaves the game pending until a teacher edits,
+previews, and approves it.
+
+The complete Bitcade package with `bitcade.json` remains the preferred format
+for student-ready submissions.
+
 ## 3. Supported first-version platforms
 
 Supported platform values for the first version are:
@@ -48,6 +61,11 @@ Supported platform values for the first version are:
 | `makecode-arcade` | MakeCode Arcade HTML export. |
 
 Future adapters may add values such as `python-pygame`, `processing`, `replit-export`, or `godot-html5`.
+
+Upload pages should link to a reference guide for each supported format as those
+guides become available. The first guide covers packaging p5.js games for local,
+offline Bitcade play. Each guide should also provide a downloadable template
+folder with required files and fill-in placeholders where practical.
 
 ## 4. `bitcade.json` schema
 

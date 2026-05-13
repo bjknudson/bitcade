@@ -1,0 +1,17 @@
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: #111426;
+  color: #f8fbff;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  display: grid;
+  place-items: center;
+}
+
+canvas {
+  display: block;
+}
