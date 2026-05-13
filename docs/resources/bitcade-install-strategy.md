@@ -61,7 +61,7 @@ You can also use the equivalent environment flag:
 BITCADE_INSTALL_KIOSK=1 scripts/install-pi.sh
 ```
 
-The kiosk option adds the minimal X packages (`xserver-xorg`, `xinit`, `x11-xserver-utils`, and `unclutter`), writes `bitcade-kiosk.service`, disables `getty@tty1`, and starts Chromium on tty1 with `startx`. The Bitcade backend still runs as `bitcade.service`; the kiosk service only owns the connected display.
+The kiosk option adds the minimal X packages (`xserver-xorg`, `xinit`, `x11-xserver-utils`, and `unclutter`), writes and enables `bitcade-kiosk.service`, and disables `getty@tty1` for future boots. Reboot to start Chromium on tty1 with `startx`, or start `bitcade-kiosk.service` manually from SSH or another tty. The Bitcade backend still runs as `bitcade.service`; the kiosk service only owns the connected display.
 
 Useful checks:
 

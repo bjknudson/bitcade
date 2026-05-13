@@ -10,6 +10,7 @@ SERVICE_FILE="/etc/systemd/system/bitcade.service"
 KIOSK_SERVICE_FILE="/etc/systemd/system/bitcade-kiosk.service"
 INSTALL_USER="${BITCADE_USER:-${SUDO_USER:-$USER}}"
 INSTALL_KIOSK="${BITCADE_INSTALL_KIOSK:-0}"
+START_KIOSK_NOW="${BITCADE_START_KIOSK:-0}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUDO=""
 
@@ -26,7 +27,7 @@ Options:
 
 Environment overrides:
   BITCADE_APP_ROOT, BITCADE_VENV_DIR, BITCADE_DATA_DIR, BITCADE_ENV_DIR,
-  BITCADE_ENV_FILE, BITCADE_USER, BITCADE_INSTALL_KIOSK
+  BITCADE_ENV_FILE, BITCADE_USER, BITCADE_INSTALL_KIOSK, BITCADE_START_KIOSK
 USAGE
 }
 
@@ -67,6 +68,31 @@ apt_package_has_candidate() {
   [[ -n "${candidate}" && "${candidate}" != "(none)" ]]
 }
 
+find_chromium_bin() {
+  local candidate
+  for candidate in chromium-browser chromium x-www-browser; do
+    if command -v "${candidate}" >/dev/null 2>&1; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+preflight_kiosk() {
+  bash -n "${REPO_ROOT}/scripts/launch-kiosk.sh"
+
+  if ! command -v startx >/dev/null 2>&1; then
+    echo "Kiosk preflight failed: startx was not found. Install xinit before enabling kiosk mode." >&2
+    exit 1
+  fi
+
+  if ! find_chromium_bin >/dev/null; then
+    echo "Kiosk preflight failed: Chromium was not found. Install chromium or chromium-browser before enabling kiosk mode." >&2
+    exit 1
+  fi
+}
+
 install_chromium() {
   if apt_package_has_candidate chromium-browser; then
     run_as_root apt-get install -y chromium-browser
@@ -87,7 +113,11 @@ if command -v apt-get >/dev/null 2>&1; then
   fi
 fi
 
-run_as_root install -d -o "${INSTALL_USER}" -g "${INSTALL_USER}" "${APP_ROOT}" "${VENV_DIR}" "${DATA_DIR}" "${DATA_DIR}/games" "${DATA_DIR}/uploads" "${DATA_DIR}/thumbnails" "${DATA_DIR}/logs"
+if [[ "${INSTALL_KIOSK}" == "1" ]]; then
+  preflight_kiosk
+fi
+
+run_as_root install -d -o "${INSTALL_USER}" -g "${INSTALL_USER}" "${APP_ROOT}" "${VENV_DIR}" "${DATA_DIR}" "${DATA_DIR}/games" "${DATA_DIR}/uploads" "${DATA_DIR}/thumbnails" "${DATA_DIR}/logs" "${DATA_DIR}/chromium-profile"
 run_as_root install -d "${ENV_DIR}"
 
 run_as_user rsync -a --delete \
@@ -142,6 +172,8 @@ Description=Bitcade local kiosk on tty1
 After=bitcade.service systemd-user-sessions.service
 Requires=bitcade.service
 Conflicts=getty@tty1.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 User=${INSTALL_USER}
@@ -157,7 +189,7 @@ StandardOutput=journal
 StandardError=journal
 ExecStart=/usr/bin/startx ${APP_ROOT}/scripts/launch-kiosk.sh -- :0 -nocursor -nolisten tcp vt1
 Restart=on-failure
-RestartSec=3
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
@@ -171,7 +203,15 @@ run_as_root systemctl restart bitcade.service
 if [[ "${INSTALL_KIOSK}" == "1" ]]; then
   run_as_root systemctl disable getty@tty1.service >/dev/null 2>&1 || true
   run_as_root systemctl enable bitcade-kiosk.service
-  run_as_root systemctl restart bitcade-kiosk.service
+
+  if [[ "${START_KIOSK_NOW}" == "1" ]]; then
+    current_tty="$(tty 2>/dev/null || true)"
+    if [[ "${current_tty}" == "/dev/tty1" ]]; then
+      echo "Kiosk service enabled but not started because this installer is running on /dev/tty1. Reboot to enter kiosk mode." >&2
+    else
+      run_as_root systemctl restart bitcade-kiosk.service
+    fi
+  fi
 fi
 
 cat <<DONE
@@ -188,6 +228,7 @@ if [[ "${INSTALL_KIOSK}" == "1" ]]; then
   cat <<DONE
 Kiosk service: bitcade-kiosk.service
 Kiosk display: connected monitor on tty1
+Kiosk start: reboot to enter kiosk mode, or run 'sudo systemctl start bitcade-kiosk.service' from SSH or another tty.
 DONE
 else
   cat <<DONE
