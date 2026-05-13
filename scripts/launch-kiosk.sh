@@ -114,6 +114,31 @@ detect_window_size() {
   return 1
 }
 
+chromium_window_size_arg() {
+  local size="$1"
+
+  if [[ "${size}" =~ ^([0-9]+)x([0-9]+)$ ]]; then
+    printf '%s,%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    return 0
+  fi
+
+  return 1
+}
+
+start_window_manager() {
+  if command -v matchbox-window-manager >/dev/null 2>&1; then
+    matchbox-window-manager -use_titlebar no -use_cursor no &
+    return 0
+  fi
+
+  if command -v openbox >/dev/null 2>&1; then
+    openbox &
+    return 0
+  fi
+
+  return 1
+}
+
 if [[ -n "${CHROMIUM_WINDOW_SIZE}" ]]; then
   configure_x_display >/dev/null || true
 else
@@ -130,9 +155,13 @@ if command -v unclutter >/dev/null 2>&1; then
   unclutter -idle 0.5 -root &
 fi
 
+start_window_manager || echo "Warning: no kiosk window manager found; Chromium fullscreen behavior may be unreliable." >&2
+sleep 0.5
+
 chromium_args=(
   --kiosk
   --start-fullscreen
+  --start-maximized
   --window-position=0,0
   --force-device-scale-factor=1
   --noerrdialogs
@@ -143,7 +172,11 @@ chromium_args=(
 )
 
 if [[ -n "${CHROMIUM_WINDOW_SIZE}" ]]; then
-  chromium_args+=(--window-size="${CHROMIUM_WINDOW_SIZE}")
+  if chromium_size="$(chromium_window_size_arg "${CHROMIUM_WINDOW_SIZE}")"; then
+    chromium_args+=(--window-size="${chromium_size}")
+  else
+    echo "Warning: ignoring invalid CHROMIUM_WINDOW_SIZE=${CHROMIUM_WINDOW_SIZE}; expected WIDTHxHEIGHT." >&2
+  fi
 fi
 
 echo "Starting Chromium kiosk at ${CHROMIUM_WINDOW_SIZE:-detected fullscreen size}."

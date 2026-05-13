@@ -112,7 +112,7 @@ if command -v apt-get >/dev/null 2>&1; then
   install_chromium
 
   if [[ "${INSTALL_KIOSK}" == "1" ]]; then
-    run_as_root apt-get install -y xserver-xorg xinit x11-xserver-utils x11-utils unclutter
+    run_as_root apt-get install -y xserver-xorg xinit x11-xserver-utils x11-utils matchbox-window-manager unclutter
   fi
 fi
 

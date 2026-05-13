@@ -61,7 +61,7 @@ You can also use the equivalent environment flag:
 BITCADE_INSTALL_KIOSK=1 scripts/install-pi.sh
 ```
 
-The kiosk option adds the minimal X packages (`xserver-xorg`, `xinit`, `x11-xserver-utils`, `x11-utils`, and `unclutter`), writes and enables `bitcade-kiosk.service`, and disables `getty@tty1` for future boots. Reboot to start Chromium on tty1 with `startx`, or start `bitcade-kiosk.service` manually from SSH or another tty. The Bitcade backend still runs as `bitcade.service`; the kiosk service only owns the connected display.
+The kiosk option adds the minimal X packages (`xserver-xorg`, `xinit`, `x11-xserver-utils`, `x11-utils`, `matchbox-window-manager`, and `unclutter`), writes and enables `bitcade-kiosk.service`, and disables `getty@tty1` for future boots. Reboot to start Chromium on tty1 with `startx`, or start `bitcade-kiosk.service` manually from SSH or another tty. The Bitcade backend still runs as `bitcade.service`; the kiosk service only owns the connected display.
 
 Useful checks:
 
@@ -73,4 +73,4 @@ journalctl -u bitcade-kiosk.service -f
 
 ## Kiosk launch
 
-`scripts/launch-kiosk.sh` opens Chromium at `http://localhost:8080/play` in kiosk mode. It searches for `chromium-browser`, `chromium`, then `x-www-browser`, or you can set `CHROMIUM_BIN`. It uses `xrandr` to switch the connected monitor to its preferred/native mode before Chromium starts, then passes that size to Chromium; run the installer with `BITCADE_KIOSK_XRANDR_MODE=largest` to force the largest advertised mode, or `BITCADE_KIOSK_WINDOW_SIZE=1920x1080` to store a fixed service override. Set `CHROMIUM_WINDOW_SIZE=1920x1080` when launching manually. It disables X screen blanking when `xset` is available, hides the pointer when `unclutter` is available, and uses a dedicated Chromium profile when `CHROMIUM_USER_DATA_DIR` is set.
+`scripts/launch-kiosk.sh` opens Chromium at `http://localhost:8080/play` in kiosk mode. It searches for `chromium-browser`, `chromium`, then `x-www-browser`, or you can set `CHROMIUM_BIN`. It uses `xrandr` to switch the connected monitor to its preferred/native mode before Chromium starts, starts `matchbox-window-manager`, then passes that size to Chromium in Chromium's required `width,height` form. Run the installer with `BITCADE_KIOSK_XRANDR_MODE=largest` to force the largest advertised mode, or `BITCADE_KIOSK_WINDOW_SIZE=1920x1080` to store a fixed service override. Set `CHROMIUM_WINDOW_SIZE=1920x1080` when launching manually. It disables X screen blanking when `xset` is available, hides the pointer when `unclutter` is available, and uses a dedicated Chromium profile when `CHROMIUM_USER_DATA_DIR` is set.
