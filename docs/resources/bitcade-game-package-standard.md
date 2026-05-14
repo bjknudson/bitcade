@@ -62,6 +62,12 @@ previews, and approves it.
 The complete Bitcade package with `bitcade.json` remains the preferred format
 for student-ready submissions.
 
+The student upload page may also generate `bitcade.json` from form answers.
+Students provide title, authors, description, player count, input needs,
+display assumptions, controls, and thumbnail. Bitcade detects the package
+format after extraction, then writes the detected `platform` and entry file into
+the generated metadata before storing the pending game.
+
 ## 3. Supported first-version platforms
 
 Supported platform values for the first version are:
@@ -310,6 +316,7 @@ Browser packages allow static browser-game assets only. Python/Pygame packages a
 .jpeg
 .svg
 .gif
+.webp
 .mp3
 .wav
 .ogg

@@ -51,6 +51,7 @@ ALLOWED_PACKAGE_EXTENSIONS = {
     ".jpeg",
     ".svg",
     ".gif",
+    ".webp",
     ".mp3",
     ".wav",
     ".ogg",
@@ -76,6 +77,25 @@ DISPLAY_SCALING_MODES = {"fullscreen", "fit", "integer-fit", "fixed"}
 SPEED_MODELS = {"delta-time", "viewport-scaled", "fixed-pixels"}
 DEFAULT_DISPLAY_WIDTH = 1900
 DEFAULT_DISPLAY_HEIGHT = 1080
+KEY_OPTIONS = (
+    "ArrowUp",
+    "ArrowDown",
+    "ArrowLeft",
+    "ArrowRight",
+    "Space",
+    "Enter",
+    "Escape",
+    "Shift",
+    "W",
+    "A",
+    "S",
+    "D",
+    "F",
+    "G",
+    "R",
+    "Slash",
+    "Period",
+)
 DEFAULT_CABINET_PROFILE = {
     "name": "Default gamepad",
     "players": {
@@ -1234,15 +1254,17 @@ class BitcadeApp:
         if content_length > self.max_upload_bytes:
             raise ValueError(f"Upload exceeds the {self.max_upload_bytes // (1024 * 1024)} MB limit.")
         fields, files = self.parse_multipart(environ, content_length)
+        student_form = None
         if require_code:
             self.require_screen_code(fields.get("screen_code", ""))
+            student_form = fields
         upload = files.get("package")
         if upload is None or not upload["filename"]:
             raise ValueError("Choose a zip package to upload.")
         filename = Path(str(upload["filename"])).name
         if Path(filename).suffix.lower() != ".zip":
             raise ValueError("Uploaded package must be a .zip file.")
-        game_id = self.install_uploaded_package(BytesIO(upload["content"]), filename, files.get("thumbnail"))
+        game_id = self.install_uploaded_package(BytesIO(upload["content"]), filename, files.get("thumbnail"), student_form=student_form)
         return game_id
 
     def validate_thumbnail_upload(self, upload: dict[str, Any]) -> str:
@@ -1321,7 +1343,13 @@ class BitcadeApp:
                 fields[name] = content.decode("utf-8", errors="replace")
         return fields, files
 
-    def install_uploaded_package(self, uploaded_file: BinaryIO, filename: str, thumbnail_upload: dict[str, Any] | None = None) -> str:
+    def install_uploaded_package(
+        self,
+        uploaded_file: BinaryIO,
+        filename: str,
+        thumbnail_upload: dict[str, Any] | None = None,
+        student_form: dict[str, str] | None = None,
+    ) -> str:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
         upload_stem = slugify(Path(filename).stem)
         upload_path = self.uploads_dir / f"{timestamp}-{upload_stem}.zip"
@@ -1329,8 +1357,15 @@ class BitcadeApp:
             shutil.copyfileobj(uploaded_file, target)
         with tempfile.TemporaryDirectory(dir=self.data_dir) as temp_name:
             temp_dir = Path(temp_name)
-            extracted_dir = self.extract_and_validate_zip(upload_path, temp_dir, upload_stem)
-            if (extracted_dir / "bitcade.json").is_file():
+            extracted_dir = self.extract_and_validate_zip(upload_path, temp_dir, upload_stem, allow_generated_metadata=student_form is not None)
+            detected = self.detect_package_format(extracted_dir)
+            if student_form is not None:
+                metadata = self.build_student_metadata(student_form, detected)
+                if detected["platform"] == "p5js":
+                    self.normalize_p5js_import(extracted_dir)
+                (extracted_dir / "bitcade.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+                validate_metadata(metadata, extracted_dir)
+            elif (extracted_dir / "bitcade.json").is_file():
                 metadata = read_metadata(extracted_dir)
             else:
                 metadata = self.build_p5js_import_metadata(extracted_dir, upload_stem)
@@ -1348,7 +1383,7 @@ class BitcadeApp:
                 self.add_game_record(conn, game_id, metadata, install_dir, status="pending", thumbnail_path=thumbnail_path)
         return game_id
 
-    def extract_and_validate_zip(self, zip_path: Path, temp_dir: Path, upload_stem: str) -> Path:
+    def extract_and_validate_zip(self, zip_path: Path, temp_dir: Path, upload_stem: str, *, allow_generated_metadata: bool = False) -> Path:
         try:
             with zipfile.ZipFile(zip_path) as archive:
                 package_members = []
@@ -1395,8 +1430,149 @@ class BitcadeApp:
         if not game_dir.is_dir():
             raise ValueError("Zip package did not extract to a game folder.")
         if not (game_dir / "bitcade.json").is_file() and not self.looks_like_p5js_export(game_dir):
-            raise ValueError("Package is missing bitcade.json and does not look like a p5.js editor export.")
+            if not allow_generated_metadata:
+                raise ValueError("Package is missing bitcade.json and does not look like a p5.js editor export.")
+            self.detect_package_format(game_dir)
         return game_dir
+
+    def detect_package_format(self, game_dir: Path) -> dict[str, str]:
+        metadata: dict[str, Any] = {}
+        metadata_path = game_dir / "bitcade.json"
+        if metadata_path.is_file():
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                metadata = {}
+
+        entry = ""
+        platform = ""
+        metadata_entry = str(metadata.get("entry", "")).strip()
+        metadata_platform = str(metadata.get("platform", "")).strip()
+
+        python_files = sorted(path.relative_to(game_dir).as_posix() for path in game_dir.rglob("*.py") if path.is_file())
+        if metadata_entry:
+            try:
+                safe_entry = safe_package_path(metadata_entry)
+            except ValueError:
+                safe_entry = ""
+            if safe_entry and (game_dir / safe_entry).is_file():
+                entry = safe_entry
+
+        if entry and Path(entry).suffix.lower() == ".py":
+            platform = PYTHON_GAME_PLATFORM
+        elif metadata_platform in SUPPORTED_PLATFORMS and metadata_platform != PYTHON_GAME_PLATFORM:
+            platform = metadata_platform
+        elif self.looks_like_p5js_export(game_dir):
+            platform = "p5js"
+        elif python_files and not (game_dir / "index.html").is_file():
+            platform = PYTHON_GAME_PLATFORM
+        elif (game_dir / "index.html").is_file():
+            platform = "html"
+        elif metadata_platform == PYTHON_GAME_PLATFORM and python_files:
+            platform = PYTHON_GAME_PLATFORM
+        else:
+            raise ValueError("Bitcade could not detect the package format. Include index.html, a p5.js export, or a Python/Pygame .py entry file.")
+
+        if not entry:
+            if platform == PYTHON_GAME_PLATFORM:
+                if not python_files:
+                    raise ValueError("Python/Pygame package is missing a .py entry file.")
+                entry = "main.py" if (game_dir / "main.py").is_file() else python_files[0]
+            else:
+                if not (game_dir / "index.html").is_file():
+                    raise ValueError("Browser package is missing index.html.")
+                entry = "index.html"
+
+        return {"platform": platform, "entry": entry}
+
+    def build_student_metadata(self, form: dict[str, str], detected: dict[str, str]) -> dict[str, Any]:
+        title = form.get("title", "").strip()
+        authors = json_list_from_text(form.get("authors", ""))
+        description = form.get("description", "").strip()
+        license_text = form.get("license", "").strip() or "Classroom use only"
+        credits = json_list_from_text(form.get("credits", ""))
+        if not title:
+            raise ValueError("Game title is required.")
+        if not authors:
+            raise ValueError("At least one author is required.")
+        if not description:
+            raise ValueError("Game description is required.")
+        if not credits:
+            credits = [f"Game by {', '.join(authors)}"]
+
+        min_players = int(form.get("min_players", "1") or "1")
+        max_players = int(form.get("max_players", "1") or "1")
+        if min_players < 1 or max_players < min_players:
+            raise ValueError("Invalid player count.")
+
+        display_width = int(form.get("display_width", str(DEFAULT_DISPLAY_WIDTH)) or DEFAULT_DISPLAY_WIDTH)
+        display_height = int(form.get("display_height", str(DEFAULT_DISPLAY_HEIGHT)) or DEFAULT_DISPLAY_HEIGHT)
+        display_scaling = form.get("display_scaling", "fit").strip() or "fit"
+        speed_model = form.get("speed_model", "delta-time").strip() or "delta-time"
+        if display_width <= 0 or display_height <= 0:
+            raise ValueError("Display width and height must be positive.")
+        if display_scaling not in DISPLAY_SCALING_MODES:
+            raise ValueError("Unsupported display scaling.")
+        if speed_model not in SPEED_MODELS:
+            raise ValueError("Unsupported speed model.")
+
+        def key(name: str, default: str) -> str:
+            value = form.get(name, "").strip()
+            return value or default
+
+        controls: dict[str, Any] = {
+            "player1": {
+                "up": key("p1_up", "ArrowUp"),
+                "down": key("p1_down", "ArrowDown"),
+                "left": key("p1_left", "ArrowLeft"),
+                "right": key("p1_right", "ArrowRight"),
+                "a": key("p1_a", "Space"),
+                "b": key("p1_b", "Shift"),
+                "start": key("p1_start", "Enter"),
+            },
+            "system": {
+                "exit": key("system_exit", "Escape"),
+                "menu": key("system_menu", "Escape"),
+            },
+        }
+        if max_players > 1:
+            controls["player2"] = {
+                "up": key("p2_up", "W"),
+                "down": key("p2_down", "S"),
+                "left": key("p2_left", "A"),
+                "right": key("p2_right", "D"),
+                "a": key("p2_a", "F"),
+                "b": key("p2_b", "G"),
+                "start": key("p2_start", "R"),
+            }
+
+        return {
+            "title": title,
+            "authors": authors,
+            "platform": detected["platform"],
+            "entry": detected["entry"],
+            "description": description,
+            "license": license_text,
+            "credits": credits,
+            "players": {
+                "min": min_players,
+                "max": max_players,
+                "simultaneous": form.get("simultaneous", "") in {"1", "true", "on", "yes"},
+            },
+            "input": {
+                "requiresKeyboard": form.get("requires_keyboard", "") in {"1", "true", "on", "yes"},
+                "requiresMouse": form.get("requires_mouse", "") in {"1", "true", "on", "yes"},
+                "supportsGamepad": form.get("supports_gamepad", "") in {"1", "true", "on", "yes"},
+                "allowsSharedKeyboard": form.get("allows_shared_keyboard", "") in {"1", "true", "on", "yes"},
+            },
+            "display": {
+                "width": display_width,
+                "height": display_height,
+                "scaling": display_scaling,
+                "speedModel": speed_model,
+            },
+            "controls": controls,
+        }
 
     def looks_like_p5js_export(self, game_dir: Path) -> bool:
         filenames = {path.name.lower() for path in game_dir.rglob("*") if path.is_file()}
@@ -1931,11 +2107,101 @@ class BitcadeApp:
           <ul>
             <li>The game opens from `index.html` or the declared Python entry file.</li>
             <li>All art, sound, fonts, libraries, and level files are inside the zip.</li>
-            <li>`bitcade.json` includes title, authors, platform, players, input, display, and controls.</li>
+            <li>The form answers are accurate enough for Bitcade to generate `bitcade.json`.</li>
             <li>Movement uses delta time or viewport-scaled values, not fixed pixels per frame.</li>
             <li>Arrow keys, Space, Enter, and the exit-to-menu control do not conflict with gameplay.</li>
           </ul>
         </section>
+        """
+
+    def render_key_select(self, name: str, label: str, selected: str) -> str:
+        options = "".join(
+            f'<option value="{html.escape(key)}"{" selected" if key == selected else ""}>{html.escape(key)}</option>'
+            for key in KEY_OPTIONS
+        )
+        return f'<label>{html.escape(label)} <select name="{html.escape(name)}">{options}</select></label>'
+
+    def render_student_metadata_fields(self) -> str:
+        profile = self.install_profile()
+        display = profile.get("display", {}) if isinstance(profile.get("display"), dict) else {}
+        viewport = display.get("safeViewport", {}) if isinstance(display.get("safeViewport"), dict) else {}
+        width = html.escape(str(viewport.get("width", DEFAULT_DISPLAY_WIDTH)))
+        height = html.escape(str(viewport.get("height", DEFAULT_DISPLAY_HEIGHT)))
+        scaling_options = "".join(
+            f'<option value="{html.escape(mode)}"{" selected" if mode == "fit" else ""}>{html.escape(mode)}</option>'
+            for mode in sorted(DISPLAY_SCALING_MODES)
+        )
+        speed_options = "".join(
+            f'<option value="{html.escape(model)}"{" selected" if model == "delta-time" else ""}>{html.escape(model)}</option>'
+            for model in sorted(SPEED_MODELS)
+        )
+        return f"""
+          <h2>Game details</h2>
+          <div class="field-row">
+            <label>Title <input name="title" required></label>
+            <label>Authors <textarea name="authors" required placeholder="One name per line"></textarea></label>
+          </div>
+          <label>Description <textarea name="description" required></textarea></label>
+          <div class="field-row">
+            <label>License <input name="license" value="Classroom use only" required></label>
+            <label>Credits <textarea name="credits" placeholder="One credit per line"></textarea></label>
+          </div>
+          <h2>Players and input</h2>
+          <div class="field-row">
+            <label>Minimum players
+              <select name="min_players">
+                <option value="1" selected>1</option>
+                <option value="2">2</option>
+              </select>
+            </label>
+            <label>Maximum players
+              <select name="max_players">
+                <option value="1" selected>1</option>
+                <option value="2">2</option>
+              </select>
+            </label>
+          </div>
+          <div class="checks">
+            <label><input type="checkbox" name="simultaneous"> Simultaneous multiplayer</label>
+            <label><input type="checkbox" name="requires_keyboard" checked> Requires keyboard</label>
+            <label><input type="checkbox" name="requires_mouse"> Requires mouse</label>
+            <label><input type="checkbox" name="supports_gamepad"> Supports gamepad</label>
+            <label><input type="checkbox" name="allows_shared_keyboard"> Allows shared keyboard</label>
+          </div>
+          <h2>Display</h2>
+          <div class="field-row">
+            <label>Viewport width <input type="number" name="display_width" min="1" value="{width}" required></label>
+            <label>Viewport height <input type="number" name="display_height" min="1" value="{height}" required></label>
+          </div>
+          <div class="field-row">
+            <label>Scaling <select name="display_scaling">{scaling_options}</select></label>
+            <label>Speed model <select name="speed_model">{speed_options}</select></label>
+          </div>
+          <h2>Player 1 controls</h2>
+          <div class="field-row input-map">
+            {self.render_key_select("p1_up", "Up", "ArrowUp")}
+            {self.render_key_select("p1_down", "Down", "ArrowDown")}
+            {self.render_key_select("p1_left", "Left", "ArrowLeft")}
+            {self.render_key_select("p1_right", "Right", "ArrowRight")}
+            {self.render_key_select("p1_a", "Main action", "Space")}
+            {self.render_key_select("p1_b", "Second action", "Shift")}
+            {self.render_key_select("p1_start", "Start", "Enter")}
+          </div>
+          <h2>Player 2 controls</h2>
+          <div class="field-row input-map">
+            {self.render_key_select("p2_up", "Up", "W")}
+            {self.render_key_select("p2_down", "Down", "S")}
+            {self.render_key_select("p2_left", "Left", "A")}
+            {self.render_key_select("p2_right", "Right", "D")}
+            {self.render_key_select("p2_a", "Main action", "F")}
+            {self.render_key_select("p2_b", "Second action", "G")}
+            {self.render_key_select("p2_start", "Start", "R")}
+          </div>
+          <h2>System controls</h2>
+          <div class="field-row">
+            {self.render_key_select("system_exit", "Exit", "Escape")}
+            {self.render_key_select("system_menu", "Menu", "Escape")}
+          </div>
         """
 
     def render_student_upload(self, message: str = "", level: str = "info", preview_game_id: str = "") -> bytes:
@@ -1961,11 +2227,15 @@ class BitcadeApp:
         <section class="panel">
           <h2>Upload package</h2>
           <p>Enter the upload code shown on the Bitcade screen, then choose your `.zip` package.</p>
-          <form class="form-grid upload-form" action="/student/upload" method="post" enctype="multipart/form-data">
-            <label>Upload code <input name="screen_code" inputmode="numeric" pattern="[0-9]{{6}}" maxlength="6" required></label>
-            <label>Zip package <input type="file" name="package" accept=".zip" required></label>
+          <form class="edit-form" action="/student/upload" method="post" enctype="multipart/form-data">
+            <div class="field-row">
+              <label>Upload code <input name="screen_code" inputmode="numeric" pattern="[0-9]{{6}}" maxlength="6" required></label>
+              <label>Zip package <input type="file" name="package" accept=".zip" required></label>
+            </div>
             <label>Thumbnail <input type="file" name="thumbnail" accept="image/png,image/jpeg,image/gif,image/webp"></label>
-            <button class="button" type="submit">Submit for approval</button>
+            <p>Bitcade detects the package format after upload and writes it into the generated <code>bitcade.json</code>.</p>
+            {self.render_student_metadata_fields()}
+            <button class="button" type="submit">Build JSON and submit</button>
           </form>
           <p>Reference guides: <a href="/student/guides/p5js">p5.js</a> · <a href="/student/guides/python-pygame">Python/Pygame</a> · <a href="/student/guides">All formats</a></p>
         </section>

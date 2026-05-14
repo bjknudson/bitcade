@@ -400,6 +400,10 @@ Student upload features should be limited to:
 - Enter description.
 - Choose player count.
 - Define controls.
+- Answer structured metadata questions with fields, dropdowns, and checkboxes so
+  Bitcade can generate `bitcade.json` for the submission.
+- Detect the package format during upload and write the detected `platform` and
+  entry file into the generated `bitcade.json`.
 - Submit for approval.
 
 Students should not be able to publish directly.
