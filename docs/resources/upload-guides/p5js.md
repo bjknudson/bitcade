@@ -66,6 +66,7 @@ my-p5-game/
   index.html
   sketch.js
   style.css
+  thumbnail.png
   libraries/
     p5.min.js
   assets/
@@ -105,6 +106,12 @@ Avoid absolute paths such as `/Users/name/Desktop/file.png` and avoid internet U
 
 Create `bitcade.json` next to `index.html`.
 
+Before filling in `display`, copy the current Bitcade install profile from the
+admin upload page. Use its safe viewport as the starting width and height unless
+your teacher gives the class a different target. Build movement with `deltaTime`
+or viewport-scaled values so resizing the game does not change how fast it
+feels.
+
 ```json
 {
   "title": "My p5 Game",
@@ -128,6 +135,12 @@ Create `bitcade.json` next to `index.html`.
     "supportsGamepad": false,
     "allowsSharedKeyboard": false
   },
+  "display": {
+    "width": 1900,
+    "height": 1080,
+    "scaling": "fit",
+    "speedModel": "delta-time"
+  },
   "controls": {
     "player1": {
       "up": "ArrowUp",
@@ -148,7 +161,23 @@ Create `bitcade.json` next to `index.html`.
 
 For two-player games, set `players.max` to `2` and add `controls.player2`.
 
-## Step 4: Test offline
+## Step 4: Match the local Bitcade profile
+
+The upload page should provide a copyable local profile similar to:
+
+```text
+Safe viewport: 1900x1080
+Menu: Arrow keys move, Space/Enter selects
+Player 1: Arrow keys, Space, Shift, Enter
+Exit: hold Escape for 3 seconds
+Timing: use delta time or viewport-scaled movement
+```
+
+Use this profile while building the game, especially when choosing canvas size,
+movement speed, collision sizes, and button prompts. Avoid hard-coding gameplay
+around a smaller canvas and then simply stretching it to the Bitcade screen.
+
+## Step 5: Test offline
 
 Before zipping the folder, open `index.html` locally in a browser.
 
@@ -160,7 +189,7 @@ The game is ready when:
 - No browser console errors mention missing files.
 - The game still works with Wi-Fi turned off.
 
-## Step 5: Create the zip for a complete package
+## Step 6: Create the zip for a complete package
 
 Zip the top-level folder itself, not just the files inside it.
 
@@ -184,6 +213,10 @@ my-p5-game.zip
 ```
 
 Upload the zip from the Bitcade admin page. The game will be installed as pending until a teacher previews and approves it.
+
+You may include `thumbnail.png` in the package or upload a separate thumbnail
+image on the Bitcade upload page. The thumbnail appears on the arcade menu card
+and the game info page.
 
 ## Common problems
 

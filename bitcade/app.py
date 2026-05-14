@@ -64,12 +64,18 @@ ALLOWED_PACKAGE_EXTENSIONS = {
 }
 BLOCKED_PACKAGE_EXTENSIONS = {".exe", ".dmg", ".pkg", ".sh", ".command", ".bat", ".app", ".jar"}
 IGNORED_PACKAGE_NAMES = {".ds_store", "thumbs.db"}
+THUMBNAIL_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+MAX_THUMBNAIL_BYTES = 5 * 1024 * 1024
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "bitcade"
 PASSWORD_HASH_ITERATIONS = 210_000
 SESSION_SECONDS = 8 * 60 * 60
 VIRTUAL_CONTROLS = ("up", "down", "left", "right", "a", "b", "start")
+DISPLAY_SCALING_MODES = {"fullscreen", "fit", "integer-fit", "fixed"}
+SPEED_MODELS = {"delta-time", "viewport-scaled", "fixed-pixels"}
+DEFAULT_DISPLAY_WIDTH = 1900
+DEFAULT_DISPLAY_HEIGHT = 1080
 DEFAULT_CABINET_PROFILE = {
     "name": "Default gamepad",
     "players": {
@@ -107,6 +113,7 @@ CREATE TABLE IF NOT EXISTS games (
   description TEXT NOT NULL,
   license TEXT NOT NULL,
   credits TEXT NOT NULL,
+  thumbnail_path TEXT,
   entry_path TEXT NOT NULL DEFAULT 'index.html',
   status TEXT NOT NULL DEFAULT 'pending',
   min_players INTEGER NOT NULL DEFAULT 1,
@@ -115,13 +122,19 @@ CREATE TABLE IF NOT EXISTS games (
   requires_keyboard INTEGER NOT NULL DEFAULT 1,
   requires_mouse INTEGER NOT NULL DEFAULT 0,
   supports_gamepad INTEGER NOT NULL DEFAULT 0,
+  display_width INTEGER,
+  display_height INTEGER,
+  display_scaling TEXT NOT NULL DEFAULT 'fit',
+  speed_model TEXT NOT NULL DEFAULT 'delta-time',
   uploaded_at TEXT NOT NULL,
   approved_at TEXT,
   play_count INTEGER NOT NULL DEFAULT 0,
   last_played TEXT,
   CHECK (status IN ('pending', 'approved', 'hidden', 'archived')),
   CHECK (min_players >= 1),
-  CHECK (max_players >= min_players)
+  CHECK (max_players >= min_players),
+  CHECK (display_scaling IN ('fullscreen', 'fit', 'integer-fit', 'fixed')),
+  CHECK (speed_model IN ('delta-time', 'viewport-scaled', 'fixed-pixels'))
 );
 
 CREATE TABLE IF NOT EXISTS files (
@@ -215,6 +228,18 @@ def validate_metadata(metadata: dict[str, Any], game_dir: Path) -> None:
     players = metadata["players"]
     if int(players.get("min", 0)) < 1 or int(players.get("max", 0)) < int(players.get("min", 0)):
         raise ValueError(f"{game_dir} has invalid player metadata")
+    display = metadata.get("display", {})
+    if display:
+        if not isinstance(display, dict):
+            raise ValueError(f"{game_dir} display metadata must be an object")
+        width = int(display.get("width", 0) or 0)
+        height = int(display.get("height", 0) or 0)
+        if width <= 0 or height <= 0:
+            raise ValueError(f"{game_dir} display width and height must be positive")
+        if str(display.get("scaling", "fit")) not in DISPLAY_SCALING_MODES:
+            raise ValueError(f"{game_dir} has unsupported display scaling")
+        if str(display.get("speedModel", "delta-time")) not in SPEED_MODELS:
+            raise ValueError(f"{game_dir} has unsupported speed model")
 
 
 def validate_package_files_for_platform(game_dir: Path, metadata: dict[str, Any]) -> None:
@@ -344,7 +369,7 @@ def html_page(title: str, body: str, *, body_class: str = "", show_chrome: bool 
     header = """
   <header class="topbar">
     <a class="brand" href="/play">Bitcade</a>
-    <nav><a href="/play">Play</a><a href="/admin">Admin</a></nav>
+    <nav><a href="/play">Play</a><a href="/student">Student Upload</a><a href="/admin">Admin</a></nav>
   </header>""" if show_chrome else ""
     return f"""<!doctype html>
 <html lang="en">
@@ -503,6 +528,29 @@ GAMEPAD_NAV_SCRIPT = """
     if ("getGamepads" in navigator) requestAnimationFrame(poll);
   })();
   </script>
+"""
+
+
+COPY_SCRIPT = """
+        <script>
+        (() => {
+          document.querySelectorAll("[data-copy-target]").forEach((button) => {
+            button.addEventListener("click", async () => {
+              const source = document.querySelector(`[data-copy-source="${button.dataset.copyTarget}"]`);
+              if (!source) return;
+              source.select();
+              try {
+                await navigator.clipboard.writeText(source.value);
+                button.textContent = "Copied";
+                setTimeout(() => { button.textContent = button.dataset.originalLabel || "Copy"; }, 1200);
+              } catch (error) {
+                document.execCommand("copy");
+              }
+            });
+            button.dataset.originalLabel = button.textContent;
+          });
+        })();
+        </script>
 """
 
 
@@ -690,7 +738,21 @@ class BitcadeApp:
     def init_db(self) -> None:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self.migrate_db(conn)
             self.ensure_admin_settings(conn)
+
+    def migrate_db(self, conn: sqlite3.Connection) -> None:
+        game_columns = {row["name"] for row in conn.execute("PRAGMA table_info(games)").fetchall()}
+        migrations = {
+            "thumbnail_path": "ALTER TABLE games ADD COLUMN thumbnail_path TEXT",
+            "display_width": "ALTER TABLE games ADD COLUMN display_width INTEGER",
+            "display_height": "ALTER TABLE games ADD COLUMN display_height INTEGER",
+            "display_scaling": "ALTER TABLE games ADD COLUMN display_scaling TEXT NOT NULL DEFAULT 'fit'",
+            "speed_model": "ALTER TABLE games ADD COLUMN speed_model TEXT NOT NULL DEFAULT 'delta-time'",
+        }
+        for column, statement in migrations.items():
+            if column not in game_columns:
+                conn.execute(statement)
 
     def ensure_admin_settings(self, conn: sqlite3.Connection) -> None:
         username = conn.execute("SELECT value FROM settings WHERE key = 'admin_username'").fetchone()
@@ -704,6 +766,8 @@ class BitcadeApp:
             conn.execute("INSERT INTO settings (key, value) VALUES ('admin_password_changed', '0')")
         if conn.execute("SELECT value FROM settings WHERE key = 'cabinet_profile'").fetchone() is None:
             conn.execute("INSERT INTO settings (key, value) VALUES ('cabinet_profile', ?)", (json.dumps(DEFAULT_CABINET_PROFILE),))
+        if conn.execute("SELECT value FROM settings WHERE key = 'install_profile'").fetchone() is None:
+            conn.execute("INSERT INTO settings (key, value) VALUES ('install_profile', ?)", (json.dumps(self.default_install_profile()),))
 
     def cabinet_profile(self) -> dict[str, Any]:
         try:
@@ -713,6 +777,97 @@ class BitcadeApp:
         if not isinstance(profile, dict):
             return DEFAULT_CABINET_PROFILE
         return profile
+
+    def default_install_profile(self) -> dict[str, Any]:
+        width = int(os.environ.get("BITCADE_SAFE_VIEWPORT_WIDTH", str(DEFAULT_DISPLAY_WIDTH)))
+        height = int(os.environ.get("BITCADE_SAFE_VIEWPORT_HEIGHT", str(DEFAULT_DISPLAY_HEIGHT)))
+        return {
+            "bitcadeInstallProfileVersion": 1,
+            "display": {
+                "resolution": {"width": width, "height": height},
+                "safeViewport": {"width": width, "height": height},
+                "scalingPolicy": os.environ.get("BITCADE_SCALING_POLICY", "fit"),
+                "targetFps": int(os.environ.get("BITCADE_TARGET_FPS", "60")),
+            },
+            "menuControls": {
+                "up": "ArrowUp",
+                "down": "ArrowDown",
+                "left": "ArrowLeft",
+                "right": "ArrowRight",
+                "select": ["Space", "Enter"],
+            },
+            "gameControls": {
+                "player1": {
+                    "up": "ArrowUp",
+                    "down": "ArrowDown",
+                    "left": "ArrowLeft",
+                    "right": "ArrowRight",
+                    "a": "Space",
+                    "b": "Shift",
+                    "start": "Enter",
+                },
+                "system": {
+                    "exitToMenu": {
+                        "keys": ["Escape"],
+                        "holdSeconds": 3,
+                    },
+                },
+            },
+            "connectedInputDevices": [{"type": "keyboard", "name": "Default keyboard"}],
+            "developerGuidance": [
+                "Design gameplay around the safe viewport.",
+                "Scale positions, collision bounds, and speed from the viewport size.",
+                "Use elapsed time or delta time for movement instead of fixed pixels per frame.",
+                "Do not use Tab as an in-game action because Bitcade/browser focus may use it.",
+            ],
+        }
+
+    def install_profile(self) -> dict[str, Any]:
+        try:
+            profile = json.loads(self.get_setting("install_profile"))
+        except (json.JSONDecodeError, ValueError):
+            profile = self.default_install_profile()
+        if not isinstance(profile, dict):
+            return self.default_install_profile()
+        return profile
+
+    def install_profile_exports(self) -> dict[str, str]:
+        profile = self.install_profile()
+        display = profile.get("display", {}) if isinstance(profile.get("display"), dict) else {}
+        viewport = display.get("safeViewport", {}) if isinstance(display.get("safeViewport"), dict) else {}
+        controls = profile.get("gameControls", {}) if isinstance(profile.get("gameControls"), dict) else {}
+        player1 = controls.get("player1", {}) if isinstance(controls.get("player1"), dict) else {}
+        system = controls.get("system", {}) if isinstance(controls.get("system"), dict) else {}
+        exit_to_menu = system.get("exitToMenu", {}) if isinstance(system.get("exitToMenu"), dict) else {}
+        width = int(viewport.get("width") or DEFAULT_DISPLAY_WIDTH)
+        height = int(viewport.get("height") or DEFAULT_DISPLAY_HEIGHT)
+        exit_keys = exit_to_menu.get("keys", ["Escape"])
+        if not isinstance(exit_keys, list):
+            exit_keys = [str(exit_keys)]
+        hold_seconds = exit_to_menu.get("holdSeconds", 3)
+        action = player1.get("a", "Space")
+        start = player1.get("start", "Enter")
+        markdown = "\n".join(
+            [
+                f"Bitcade target viewport: {width}x{height}",
+                "Menu controls: Arrow keys move focus; Space or Enter selects.",
+                f"Player 1 controls: Arrow keys move; {action} is the main action; {start} starts/selects.",
+                f"Exit behavior: hold {' + '.join(str(key) for key in exit_keys)} for {hold_seconds} seconds to return to the Bitcade menu.",
+                "Timing rule: use delta time or viewport-scaled movement so resizing does not change gameplay speed.",
+            ]
+        )
+        prompt = (
+            f"Build this game for a Bitcade install with a {width}x{height} safe gameplay viewport. "
+            f"Use Arrow keys for movement, {action} for the main action, {start} for start/select, "
+            f"and {' + '.join(str(key) for key in exit_keys)} held for {hold_seconds} seconds to exit back to the Bitcade menu. "
+            "Keep gameplay speed independent of resolution by using delta time or scaling movement from the viewport size. "
+            "Do not rely on Tab for gameplay."
+        )
+        return {
+            "json": json.dumps(profile, indent=2),
+            "markdown": markdown,
+            "prompt": prompt,
+        }
 
     def seed_sample_games(self) -> None:
         if not SAMPLE_GAMES_DIR.exists():
@@ -729,17 +884,27 @@ class BitcadeApp:
                 metadata = read_metadata(install_dir)
                 self.add_game_record(conn, game_id, metadata, install_dir, status="approved")
 
-    def add_game_record(self, conn: sqlite3.Connection, game_id: str, metadata: dict[str, Any], game_dir: Path, status: str) -> None:
+    def add_game_record(
+        self,
+        conn: sqlite3.Connection,
+        game_id: str,
+        metadata: dict[str, Any],
+        game_dir: Path,
+        status: str,
+        thumbnail_path: str | None = None,
+    ) -> None:
         now = utc_now()
         players = metadata["players"]
         input_meta = metadata["input"]
+        display_meta = metadata.get("display", {}) if isinstance(metadata.get("display", {}), dict) else {}
         conn.execute(
             """
             INSERT INTO games (
-              id, title, authors, platform, description, license, credits, entry_path, status,
+              id, title, authors, platform, description, license, credits, thumbnail_path, entry_path, status,
               min_players, max_players, simultaneous, requires_keyboard, requires_mouse,
-              supports_gamepad, uploaded_at, approved_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              supports_gamepad, display_width, display_height, display_scaling, speed_model,
+              uploaded_at, approved_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 game_id,
@@ -749,6 +914,7 @@ class BitcadeApp:
                 metadata["description"],
                 metadata["license"],
                 json.dumps(metadata["credits"]),
+                thumbnail_path,
                 metadata["entry"],
                 status,
                 int(players["min"]),
@@ -757,6 +923,10 @@ class BitcadeApp:
                 int(bool(input_meta.get("requiresKeyboard", True))),
                 int(bool(input_meta.get("requiresMouse", False))),
                 int(bool(input_meta.get("supportsGamepad", False))),
+                int(display_meta["width"]) if display_meta.get("width") else None,
+                int(display_meta["height"]) if display_meta.get("height") else None,
+                str(display_meta.get("scaling", "fit")),
+                str(display_meta.get("speedModel", "delta-time")),
                 now,
                 now if status == "approved" else None,
             ),
@@ -883,10 +1053,37 @@ class BitcadeApp:
             return self.handle_post(environ, start_response, path)
         if path == "/play":
             return self.response(start_response, "200 OK", self.render_play())
+        if path.startswith("/play/") and path.endswith("/launch"):
+            game_id = safe_url_path(path.removeprefix("/play/").removesuffix("/launch"))
+            return self.launch_game(start_response, game_id)
         if path.startswith("/play/"):
-            return self.launch_game(start_response, safe_url_path(path.removeprefix("/play/")))
+            return self.render_game_info(start_response, safe_url_path(path.removeprefix("/play/")))
+        if path == "/student":
+            query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+            return self.response(
+                start_response,
+                "200 OK",
+                self.render_student_upload(
+                    first_form_value(query, "message"),
+                    first_form_value(query, "level", "info"),
+                    first_form_value(query, "preview"),
+                ),
+            )
+        if path == "/student/guides":
+            return self.response(start_response, "200 OK", self.render_upload_guides(base_path="/student/guides", back_link="/student"))
+        if path.startswith("/student/guides/") and path.endswith("/template.zip"):
+            guide_id = safe_url_path(path.removeprefix("/student/guides/").removesuffix("/template.zip"))
+            return self.download_upload_template(start_response, guide_id)
+        if path.startswith("/student/guides/"):
+            guide_id = safe_url_path(path.removeprefix("/student/guides/"))
+            return self.response(start_response, "200 OK", self.render_upload_guide(guide_id, base_path="/student/guides", back_link="/student"))
+        if path.startswith("/student/games/") and path.endswith("/preview"):
+            game_id = safe_url_path(path.removeprefix("/student/games/").removesuffix("/preview"))
+            return self.preview_student_game(start_response, game_id)
         if path.startswith("/game-files/"):
             return self.serve_game_file(start_response, path.removeprefix("/game-files/"))
+        if path.startswith("/thumbnails/"):
+            return self.serve_thumbnail(start_response, path.removeprefix("/thumbnails/"))
         if path.startswith("/static/"):
             return self.serve_static(start_response, path.removeprefix("/static/"))
         if path == "/admin/login":
@@ -933,12 +1130,18 @@ class BitcadeApp:
                     return auth_response
             if path == "/admin/change-password":
                 return self.handle_change_password(environ, start_response)
+            if path == "/student/upload":
+                return self.handle_student_upload(environ, start_response)
             if path == "/admin/upload":
                 return self.handle_upload(environ, start_response)
             if path == "/admin/input":
                 form = self.parse_urlencoded(environ)
                 self.update_input_settings(form)
                 return self.redirect(start_response, "/admin/input?message=Input%20settings%20updated.")
+            if path == "/admin/install-profile":
+                form = self.parse_urlencoded(environ)
+                self.update_install_profile(form)
+                return self.redirect(start_response, "/admin/input?message=Install%20profile%20updated.")
             if path.startswith("/admin/games/") and path.endswith("/status"):
                 game_id = safe_url_path(path.removeprefix("/admin/games/").removesuffix("/status"))
                 form = self.parse_urlencoded(environ)
@@ -946,8 +1149,16 @@ class BitcadeApp:
                 return self.redirect_admin(start_response, "Game status updated.")
             if path.startswith("/admin/games/") and path.endswith("/edit"):
                 game_id = safe_url_path(path.removeprefix("/admin/games/").removesuffix("/edit"))
-                form = self.parse_urlencoded(environ)
-                self.update_game_metadata(game_id, form)
+                content_type = environ.get("CONTENT_TYPE", "")
+                thumbnail_upload = None
+                if content_type.lower().startswith("multipart/form-data"):
+                    content_length = int(environ.get("CONTENT_LENGTH") or 0)
+                    fields, files = self.parse_multipart(environ, content_length)
+                    form = {key: [value] for key, value in fields.items()}
+                    thumbnail_upload = files.get("thumbnail")
+                else:
+                    form = self.parse_urlencoded(environ)
+                self.update_game_metadata(game_id, form, thumbnail_upload)
                 return self.redirect_admin(start_response, "Game metadata updated.")
             return self.not_found(start_response)
         except ValueError as error:
@@ -955,6 +1166,8 @@ class BitcadeApp:
                 return self.redirect(start_response, f"/admin/login?message={quote(str(error))}&level=error")
             if path == "/admin/change-password":
                 return self.redirect(start_response, f"/admin/change-password?message={quote(str(error))}&level=error")
+            if path == "/student/upload":
+                return self.redirect(start_response, f"/student?message={quote(str(error))}&level=error")
             return self.redirect_admin(start_response, str(error), "error")
 
     def parse_urlencoded(self, environ) -> dict[str, list[str]]:
@@ -1004,20 +1217,78 @@ class BitcadeApp:
         return self.redirect_admin(start_response, "Admin password updated.")
 
     def handle_upload(self, environ, start_response):
+        game_id = self.receive_uploaded_package(environ)
+        return self.redirect_admin(start_response, f"Uploaded {game_id} for teacher approval.")
+
+    def handle_student_upload(self, environ, start_response):
+        game_id = self.receive_uploaded_package(environ, require_code=True)
+        return self.redirect(
+            start_response,
+            f"/student?message={quote(f'Submitted {game_id} for teacher approval.')}&level=info&preview={quote(game_id)}",
+        )
+
+    def receive_uploaded_package(self, environ, *, require_code: bool = False) -> str:
         content_length = int(environ.get("CONTENT_LENGTH") or 0)
         if content_length <= 0:
             raise ValueError("Choose a zip package to upload.")
         if content_length > self.max_upload_bytes:
             raise ValueError(f"Upload exceeds the {self.max_upload_bytes // (1024 * 1024)} MB limit.")
         fields, files = self.parse_multipart(environ, content_length)
+        if require_code:
+            self.require_screen_code(fields.get("screen_code", ""))
         upload = files.get("package")
         if upload is None or not upload["filename"]:
             raise ValueError("Choose a zip package to upload.")
         filename = Path(str(upload["filename"])).name
         if Path(filename).suffix.lower() != ".zip":
             raise ValueError("Uploaded package must be a .zip file.")
-        game_id = self.install_uploaded_package(BytesIO(upload["content"]), filename)
-        return self.redirect_admin(start_response, f"Uploaded {game_id} for teacher approval.")
+        game_id = self.install_uploaded_package(BytesIO(upload["content"]), filename, files.get("thumbnail"))
+        return game_id
+
+    def validate_thumbnail_upload(self, upload: dict[str, Any]) -> str:
+        filename = Path(str(upload.get("filename", ""))).name
+        extension = Path(filename).suffix.lower()
+        content = upload.get("content", b"")
+        if not filename or not content:
+            raise ValueError("Thumbnail upload is empty.")
+        if extension not in THUMBNAIL_EXTENSIONS:
+            raise ValueError("Thumbnail must be a PNG, JPG, GIF, or WebP image.")
+        if len(content) > MAX_THUMBNAIL_BYTES:
+            raise ValueError(f"Thumbnail exceeds the {MAX_THUMBNAIL_BYTES // (1024 * 1024)} MB limit.")
+        return extension
+
+    def save_thumbnail_upload(self, game_id: str, upload: dict[str, Any]) -> str:
+        extension = self.validate_thumbnail_upload(upload)
+        for existing in self.thumbnails_dir.glob(f"{game_id}.*"):
+            if existing.is_file():
+                existing.unlink()
+        filename = f"{game_id}{extension}"
+        target = self.thumbnails_dir / filename
+        target.write_bytes(upload["content"])
+        return filename
+
+    def install_package_thumbnail(self, game_id: str, game_dir: Path) -> str | None:
+        candidates = []
+        for path in game_dir.rglob("*"):
+            if path.is_file() and path.stem.lower() == "thumbnail" and path.suffix.lower() in THUMBNAIL_EXTENSIONS:
+                candidates.append(path)
+        if not candidates:
+            return None
+        source = sorted(candidates, key=lambda path: len(path.relative_to(game_dir).parts))[0]
+        return self.save_thumbnail_upload(game_id, {"filename": source.name, "content": source.read_bytes()})
+
+    def thumbnail_url(self, game: dict[str, Any]) -> str:
+        thumbnail_path = str(game.get("thumbnail_path") or "").strip()
+        if thumbnail_path:
+            return f"/thumbnails/{quote(thumbnail_path)}"
+        return ""
+
+    def render_thumbnail(self, game: dict[str, Any], *, large: bool = False) -> str:
+        classes = "thumbnail thumbnail-large" if large else "thumbnail"
+        url = self.thumbnail_url(game)
+        if url:
+            return f'<div class="{classes}"><img src="{html.escape(url)}" alt=""></div>'
+        return f'<div class="{classes}" aria-hidden="true">{html.escape(str(game["title"])[:1])}</div>'
 
     def parse_multipart(self, environ, content_length: int) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
         content_type = environ.get("CONTENT_TYPE", "")
@@ -1050,7 +1321,7 @@ class BitcadeApp:
                 fields[name] = content.decode("utf-8", errors="replace")
         return fields, files
 
-    def install_uploaded_package(self, uploaded_file: BinaryIO, filename: str) -> str:
+    def install_uploaded_package(self, uploaded_file: BinaryIO, filename: str, thumbnail_upload: dict[str, Any] | None = None) -> str:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
         upload_stem = slugify(Path(filename).stem)
         upload_path = self.uploads_dir / f"{timestamp}-{upload_stem}.zip"
@@ -1070,8 +1341,11 @@ class BitcadeApp:
             game_id = self.available_game_id(slugify(str(metadata["title"])))
             install_dir = self.games_dir / game_id
             shutil.move(str(extracted_dir), install_dir)
+            thumbnail_path = self.install_package_thumbnail(game_id, install_dir)
+            if thumbnail_upload is not None and thumbnail_upload.get("filename"):
+                thumbnail_path = self.save_thumbnail_upload(game_id, thumbnail_upload)
             with self.connect() as conn:
-                self.add_game_record(conn, game_id, metadata, install_dir, status="pending")
+                self.add_game_record(conn, game_id, metadata, install_dir, status="pending", thumbnail_path=thumbnail_path)
         return game_id
 
     def extract_and_validate_zip(self, zip_path: Path, temp_dir: Path, upload_stem: str) -> Path:
@@ -1194,6 +1468,12 @@ class BitcadeApp:
                 "supportsGamepad": False,
                 "allowsSharedKeyboard": False,
             },
+            "display": {
+                "width": DEFAULT_DISPLAY_WIDTH,
+                "height": DEFAULT_DISPLAY_HEIGHT,
+                "scaling": "fit",
+                "speedModel": "delta-time",
+            },
             "controls": {
                 "player1": {
                     "up": "ArrowUp",
@@ -1230,7 +1510,7 @@ class BitcadeApp:
             approved_at = utc_now() if status == "approved" else None
             conn.execute("UPDATE games SET status = ?, approved_at = ? WHERE id = ?", (status, approved_at, game_id))
 
-    def update_game_metadata(self, game_id: str, form: dict[str, list[str]]) -> None:
+    def update_game_metadata(self, game_id: str, form: dict[str, list[str]], thumbnail_upload: dict[str, Any] | None = None) -> None:
         title = first_form_value(form, "title").strip()
         authors = json_list_from_text(first_form_value(form, "authors"))
         platform = first_form_value(form, "platform").strip()
@@ -1254,6 +1534,16 @@ class BitcadeApp:
             "requiresMouse": bool_from_form(form, "requires_mouse"),
             "supportsGamepad": bool_from_form(form, "supports_gamepad"),
         }
+        display_width = int(first_form_value(form, "display_width", "0") or "0")
+        display_height = int(first_form_value(form, "display_height", "0") or "0")
+        display_scaling = first_form_value(form, "display_scaling", "fit").strip() or "fit"
+        speed_model = first_form_value(form, "speed_model", "delta-time").strip() or "delta-time"
+        if display_width <= 0 or display_height <= 0:
+            raise ValueError("Display width and height must be positive.")
+        if display_scaling not in DISPLAY_SCALING_MODES:
+            raise ValueError("Unsupported display scaling.")
+        if speed_model not in SPEED_MODELS:
+            raise ValueError("Unsupported speed model.")
         with self.connect() as conn:
             game = conn.execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
             if game is None:
@@ -1275,16 +1565,27 @@ class BitcadeApp:
                         "simultaneous": bool_from_form(form, "simultaneous"),
                     },
                     "input": {**metadata.get("input", {}), **input_meta},
+                    "display": {
+                        "width": display_width,
+                        "height": display_height,
+                        "scaling": display_scaling,
+                        "speedModel": speed_model,
+                    },
                 }
             )
             validate_metadata(metadata, game_dir)
             metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+            thumbnail_path = game["thumbnail_path"]
+            if thumbnail_upload is not None and thumbnail_upload.get("filename"):
+                thumbnail_path = self.save_thumbnail_upload(game_id, thumbnail_upload)
             conn.execute(
                 """
                 UPDATE games
                 SET title = ?, authors = ?, platform = ?, description = ?, license = ?, credits = ?,
                     entry_path = ?, min_players = ?, max_players = ?, simultaneous = ?,
-                    requires_keyboard = ?, requires_mouse = ?, supports_gamepad = ?
+                    requires_keyboard = ?, requires_mouse = ?, supports_gamepad = ?,
+                    display_width = ?, display_height = ?, display_scaling = ?, speed_model = ?,
+                    thumbnail_path = ?
                 WHERE id = ?
                 """,
                 (
@@ -1301,6 +1602,11 @@ class BitcadeApp:
                     int(input_meta["requiresKeyboard"]),
                     int(input_meta["requiresMouse"]),
                     int(input_meta["supportsGamepad"]),
+                    display_width,
+                    display_height,
+                    display_scaling,
+                    speed_model,
+                    thumbnail_path,
                     game_id,
                 ),
             )
@@ -1318,27 +1624,62 @@ class BitcadeApp:
             if game["supports_gamepad"]:
                 badges.append("🎮 Gamepad")
             cards.append(f"""
-            <article class="card">
-              <div class="thumbnail" aria-hidden="true">{html.escape(game['title'][:1])}</div>
+            <a class="card game-card" href="/play/{html.escape(game['id'])}" data-nav-start aria-label="Open {html.escape(game['title'])}">
+              {self.render_thumbnail(game)}
               <div class="card-body">
                 <h2>{html.escape(game['title'])}</h2>
                 <p class="byline">{html.escape(', '.join(game['authors']))}</p>
                 <p>{html.escape(game['description'])}</p>
                 <ul class="badges">{''.join(f'<li>{badge}</li>' for badge in badges)}</ul>
-                <a class="button" href="/play/{html.escape(game['id'])}" data-nav-start>Launch game</a>
               </div>
-            </article>""")
+            </a>""")
         body = """
         <div class="arcade-menu">
         <section class="hero">
           <p class="eyebrow">Phase 1 browser arcade</p>
           <h1>Choose a local game</h1>
           <p>Approved games are served from local Bitcade storage and launch on the Bitcade machine.</p>
+          <p class="screen-code">Student upload code <strong>{code}</strong></p>
         </section>
         <section class="grid" aria-label="Approved games">{cards}</section>
         </div>
-        """.format(cards="".join(cards) or '<p class="empty">No approved games yet.</p>')
+        """.format(cards="".join(cards) or '<p class="empty">No approved games yet.</p>', code=self.current_screen_code())
         return html_page("Bitcade Play", body)
+
+    def render_game_info(self, start_response, game_id: str):
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM games WHERE id = ? AND status = 'approved'", (game_id,)).fetchone()
+        if row is None:
+            return self.not_found(start_response)
+        game = self.rows_to_games([row])[0]
+        badges = [html.escape(game["platform"]), f"{game['min_players']}-{game['max_players']} players"]
+        if game["requires_keyboard"]:
+            badges.append("Keyboard")
+        if game["requires_mouse"]:
+            badges.append("Mouse")
+        if game["supports_gamepad"]:
+            badges.append("Gamepad")
+        display = ""
+        if game.get("display_width") and game.get("display_height"):
+            display = f"<p>Designed for {game['display_width']}x{game['display_height']} with {html.escape(game['speed_model'])} movement.</p>"
+        body = f"""
+        <section class="game-info">
+          {self.render_thumbnail(game, large=True)}
+          <div class="game-info-body">
+            <p class="eyebrow">Game info</p>
+            <h1>{html.escape(game['title'])}</h1>
+            <p class="byline">{html.escape(', '.join(game['authors']))}</p>
+            <p>{html.escape(game['description'])}</p>
+            {display}
+            <ul class="badges">{''.join(f'<li>{badge}</li>' for badge in badges)}</ul>
+            <div class="form-actions">
+              <a class="button" href="/play/{html.escape(game['id'])}/launch" data-nav-start>Launch game</a>
+              <a class="button secondary" href="/play">Back to menu</a>
+            </div>
+          </div>
+        </section>
+        """
+        return self.response(start_response, "200 OK", html_page(f"{game['title']} Info", body))
 
     def launch_game(self, start_response, game_id: str):
         with self.connect() as conn:
@@ -1378,6 +1719,25 @@ class BitcadeApp:
         </section>
         {GAME_FIT_SCRIPT}
         {game_input_script(self.cabinet_profile(), metadata.get("controls", {}), "/admin")}
+        """
+        return self.response(start_response, "200 OK", html_page(f"Previewing {game['title']}", body, body_class="game-page", show_chrome=False))
+
+    def preview_student_game(self, start_response, game_id: str):
+        with self.connect() as conn:
+            game = conn.execute("SELECT * FROM games WHERE id = ? AND status = 'pending'", (game_id,)).fetchone()
+            if game is None:
+                return self.not_found(start_response)
+            game = dict(game)
+        if game["platform"] == PYTHON_GAME_PLATFORM:
+            return self.launch_native_python_game(start_response, game, "/student", preview=True)
+        metadata = read_metadata(self.games_dir / game_id)
+        body = f"""
+        <section class="game-shell" aria-label="Student preview {html.escape(game['title'])}">
+          <iframe class="game-frame" title="{html.escape(game['title'])}" src="/game-files/{html.escape(game_id)}/{html.escape(game['entry_path'])}" tabindex="0" allowfullscreen></iframe>
+          <a class="game-return button secondary small" href="/student">Student Upload</a>
+        </section>
+        {GAME_FIT_SCRIPT}
+        {game_input_script(self.cabinet_profile(), metadata.get("controls", {}), "/student")}
         """
         return self.response(start_response, "200 OK", html_page(f"Previewing {game['title']}", body, body_class="game-page", show_chrome=False))
 
@@ -1480,19 +1840,19 @@ class BitcadeApp:
         """
         return html_page("Change Admin Password", body)
 
-    def render_upload_guides(self) -> bytes:
+    def render_upload_guides(self, *, base_path: str = "/admin/guides", back_link: str = "/admin") -> bytes:
         cards = []
         for guide_id, guide in sorted(FORMAT_GUIDES.items()):
             template_link = ""
             if guide.get("template_path"):
-                template_link = f'<a class="button" href="/admin/guides/{html.escape(guide_id)}/template.zip">Download template</a>'
+                template_link = f'<a class="button" href="{html.escape(base_path)}/{html.escape(guide_id)}/template.zip">Download template</a>'
             cards.append(f"""
             <article class="card guide-card">
               <div class="card-body">
                 <h2>{html.escape(guide['title'])}</h2>
                 <p>{html.escape(guide['summary'])}</p>
                 <div class="form-actions">
-                  <a class="button secondary" href="/admin/guides/{html.escape(guide_id)}">Open guide</a>
+                  <a class="button secondary" href="{html.escape(base_path)}/{html.escape(guide_id)}">Open guide</a>
                   {template_link}
                 </div>
               </div>
@@ -1504,21 +1864,21 @@ class BitcadeApp:
           <p>Use these guides to package student games into Bitcade-compatible zip files.</p>
         </section>
         <section class="grid">{''.join(cards)}</section>
-        <p><a href="/admin">Back to admin</a></p>
+        <p><a href="{html.escape(back_link)}">Back</a></p>
         """
         return html_page("Upload Guides", body)
 
-    def render_upload_guide(self, guide_id: str) -> bytes:
+    def render_upload_guide(self, guide_id: str, *, base_path: str = "/admin/guides", back_link: str = "/admin") -> bytes:
         guide = FORMAT_GUIDES.get(guide_id)
         if guide is None:
-            return html_page("Guide not found", "<h1>Guide not found</h1><p><a href=\"/admin/guides\">Back to guides</a></p>")
+            return html_page("Guide not found", f"<h1>Guide not found</h1><p><a href=\"{html.escape(base_path)}\">Back to guides</a></p>")
         doc_path = guide["doc_path"]
         if not doc_path.is_file():
             return html_page("Guide missing", "<h1>Guide missing</h1><p>The guide file has not been created yet.</p>")
         guide_html = render_markdown_reference(doc_path.read_text(encoding="utf-8"))
         template_action = ""
         if guide.get("template_path"):
-            template_action = f'<a class="button" href="/admin/guides/{html.escape(guide_id)}/template.zip">Download template folder</a>'
+            template_action = f'<a class="button" href="{html.escape(base_path)}/{html.escape(guide_id)}/template.zip">Download template folder</a>'
         body = f"""
         <section class="hero compact">
           <p class="eyebrow">Upload reference</p>
@@ -1526,10 +1886,91 @@ class BitcadeApp:
           <p>{html.escape(guide['summary'])}</p>
           {template_action}
         </section>
+        {self.render_install_profile_panel(compact=True)}
         <article class="panel guide-body">{guide_html}</article>
-        <p><a href="/admin/guides">All upload guides</a> · <a href="/admin">Back to upload</a></p>
+        <p><a href="{html.escape(base_path)}">All upload guides</a> · <a href="{html.escape(back_link)}">Back to upload</a></p>
         """
         return html_page(f"{guide['title']} Upload Guide", body)
+
+    def render_install_profile_panel(self, *, compact: bool = False) -> str:
+        exports = self.install_profile_exports()
+        profile = self.install_profile()
+        display = profile.get("display", {}) if isinstance(profile.get("display"), dict) else {}
+        viewport = display.get("safeViewport", {}) if isinstance(display.get("safeViewport"), dict) else {}
+        width = html.escape(str(viewport.get("width", DEFAULT_DISPLAY_WIDTH)))
+        height = html.escape(str(viewport.get("height", DEFAULT_DISPLAY_HEIGHT)))
+        fields = f"""
+          <label>JSON export <textarea readonly data-copy-source="install-json">{html.escape(exports['json'])}</textarea></label>
+          <label>Markdown export <textarea readonly data-copy-source="install-markdown">{html.escape(exports['markdown'])}</textarea></label>
+        """
+        return f"""
+        <section class="panel install-profile">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Local install profile</p>
+              <h2>Build for this Bitcade</h2>
+            </div>
+            <p class="profile-size">{width}x{height}</p>
+          </div>
+          <p>Use these export instructions when creating the game in p5.js, pygame, or a development AI prompt. They describe this machine's target viewport, controls, and exit behavior.</p>
+          <label>AI prompt block <textarea readonly data-copy-source="install-prompt">{html.escape(exports['prompt'])}</textarea></label>
+          <div class="form-actions">
+            <button class="button secondary small" type="button" data-copy-target="install-prompt">Copy AI prompt</button>
+            <button class="button secondary small" type="button" data-copy-target="install-json">Copy JSON</button>
+            <button class="button secondary small" type="button" data-copy-target="install-markdown">Copy Markdown</button>
+          </div>
+          {fields}
+        </section>
+        {COPY_SCRIPT}
+        """
+
+    def render_submission_checklist(self) -> str:
+        return """
+        <section class="panel checklist">
+          <h2>Submission checklist</h2>
+          <ul>
+            <li>The game opens from `index.html` or the declared Python entry file.</li>
+            <li>All art, sound, fonts, libraries, and level files are inside the zip.</li>
+            <li>`bitcade.json` includes title, authors, platform, players, input, display, and controls.</li>
+            <li>Movement uses delta time or viewport-scaled values, not fixed pixels per frame.</li>
+            <li>Arrow keys, Space, Enter, and the exit-to-menu control do not conflict with gameplay.</li>
+          </ul>
+        </section>
+        """
+
+    def render_student_upload(self, message: str = "", level: str = "info", preview_game_id: str = "") -> bytes:
+        alert = f'<p class="notice {html.escape(level)}">{html.escape(message)}</p>' if message else ""
+        preview = ""
+        if preview_game_id:
+            preview = f"""
+            <section class="panel">
+              <h2>Preview submitted game</h2>
+              <p>Your upload is pending teacher approval. Open it here to confirm the package launches on Bitcade before your teacher reviews it.</p>
+              <a class="button" href="/student/games/{html.escape(preview_game_id)}/preview" data-nav-start>Preview game</a>
+            </section>"""
+        body = f"""
+        <section class="hero compact">
+          <p class="eyebrow">Student upload</p>
+          <h1>Submit a game</h1>
+          <p>Upload a Bitcade zip for teacher review. Games stay pending until a teacher previews and approves them.</p>
+        </section>
+        {alert}
+        {preview}
+        {self.render_install_profile_panel(compact=True)}
+        {self.render_submission_checklist()}
+        <section class="panel">
+          <h2>Upload package</h2>
+          <p>Enter the upload code shown on the Bitcade screen, then choose your `.zip` package.</p>
+          <form class="form-grid upload-form" action="/student/upload" method="post" enctype="multipart/form-data">
+            <label>Upload code <input name="screen_code" inputmode="numeric" pattern="[0-9]{{6}}" maxlength="6" required></label>
+            <label>Zip package <input type="file" name="package" accept=".zip" required></label>
+            <label>Thumbnail <input type="file" name="thumbnail" accept="image/png,image/jpeg,image/gif,image/webp"></label>
+            <button class="button" type="submit">Submit for approval</button>
+          </form>
+          <p>Reference guides: <a href="/student/guides/p5js">p5.js</a> · <a href="/student/guides/python-pygame">Python/Pygame</a> · <a href="/student/guides">All formats</a></p>
+        </section>
+        """
+        return html_page("Student Upload", body)
 
     def download_upload_template(self, start_response, guide_id: str):
         guide = FORMAT_GUIDES.get(guide_id)
@@ -1578,12 +2019,14 @@ class BitcadeApp:
         <section class="panel">
           <h2>Upload package</h2>
           <p>Reference guides: <a href="/admin/guides/p5js">p5.js</a> · <a href="/admin/guides">All formats</a></p>
-          <form class="form-grid" action="/admin/upload" method="post" enctype="multipart/form-data">
+          <form class="form-grid upload-form" action="/admin/upload" method="post" enctype="multipart/form-data">
             <label>Zip package <input type="file" name="package" accept=".zip" required></label>
+            <label>Thumbnail <input type="file" name="thumbnail" accept="image/png,image/jpeg,image/gif,image/webp"></label>
             <button class="button" type="submit">Upload for approval</button>
           </form>
-          <p>Admin uploads are protected by login. The short upload code is reserved for the later student upload page.</p>
+          <p>Admin uploads are protected by login. Student uploads use the short code shown on the Bitcade play screen.</p>
         </section>
+        {self.render_install_profile_panel(compact=True)}
         <table class="admin-table">
           <thead><tr><th>Title</th><th>Status</th><th>Players</th><th>Plays</th><th>Last played</th><th>Actions</th></tr></thead>
           <tbody>{''.join(rows) or '<tr><td colspan="6">No games installed.</td></tr>'}</tbody>
@@ -1593,9 +2036,18 @@ class BitcadeApp:
 
     def render_input_settings(self, message: str = "", level: str = "info") -> bytes:
         profile = self.cabinet_profile()
+        install_profile = self.install_profile()
+        display = install_profile.get("display", {}) if isinstance(install_profile.get("display"), dict) else {}
+        resolution = display.get("resolution", {}) if isinstance(display.get("resolution"), dict) else {}
+        viewport = display.get("safeViewport", {}) if isinstance(display.get("safeViewport"), dict) else {}
         players = profile.get("players", {})
         system = profile.get("system", {})
         alert = f'<p class="notice {html.escape(level)}">{html.escape(message)}</p>' if message else ""
+        scaling_policy = str(display.get("scalingPolicy", "fit"))
+        scaling_options = "".join(
+            f'<option value="{html.escape(mode)}"{" selected" if mode == scaling_policy else ""}>{html.escape(mode)}</option>'
+            for mode in sorted(DISPLAY_SCALING_MODES)
+        )
 
         def value(player: str, control: str) -> str:
             player_profile = players.get(player, {}) if isinstance(players, dict) else {}
@@ -1616,6 +2068,30 @@ class BitcadeApp:
           <p>Configure cabinet mappings and check connected controllers from this browser.</p>
         </section>
         {alert}
+        <form class="panel edit-form" action="/admin/install-profile" method="post">
+          <h2>Display profile</h2>
+          <p>Set the target students should build for. Use Detect from this browser, then override values if the class should target a smaller fixed viewport.</p>
+          <div class="field-row">
+            <label>Display width <input id="display-width" type="number" name="display_width" min="1" value="{html.escape(str(resolution.get('width', DEFAULT_DISPLAY_WIDTH)))}" required></label>
+            <label>Display height <input id="display-height" type="number" name="display_height" min="1" value="{html.escape(str(resolution.get('height', DEFAULT_DISPLAY_HEIGHT)))}" required></label>
+          </div>
+          <div class="field-row">
+            <label>Safe viewport width <input id="safe-width" type="number" name="safe_width" min="1" value="{html.escape(str(viewport.get('width', DEFAULT_DISPLAY_WIDTH)))}" required></label>
+            <label>Safe viewport height <input id="safe-height" type="number" name="safe_height" min="1" value="{html.escape(str(viewport.get('height', DEFAULT_DISPLAY_HEIGHT)))}" required></label>
+          </div>
+          <div class="field-row">
+            <label>Scaling policy <select name="scaling_policy">{scaling_options}</select></label>
+            <label>Target FPS <input type="number" name="target_fps" min="1" value="{html.escape(str(display.get('targetFps', 60)))}" required></label>
+          </div>
+          <div class="field-row">
+            <label>Exit hold seconds <input type="number" step="0.25" min="0.5" max="10" name="exit_hold_seconds" value="{html.escape(str(install_profile.get('gameControls', {}).get('system', {}).get('exitToMenu', {}).get('holdSeconds', 3)))}"></label>
+          </div>
+          <div class="form-actions">
+            <button class="button secondary" type="button" id="detect-display">Detect from browser</button>
+            <button class="button" type="submit">Save install profile</button>
+          </div>
+        </form>
+        {self.render_install_profile_panel(compact=True)}
         <section class="panel">
           <h2>Controller detection</h2>
           <p id="gamepad-status">Press a button on a connected controller.</p>
@@ -1667,6 +2143,18 @@ class BitcadeApp:
           }};
           if ("getGamepads" in navigator) requestAnimationFrame(render);
         }})();
+        (() => {{
+          const button = document.getElementById("detect-display");
+          if (!button) return;
+          button.addEventListener("click", () => {{
+            const width = Math.round(window.screen?.width || window.innerWidth);
+            const height = Math.round(window.screen?.height || window.innerHeight);
+            document.getElementById("display-width").value = width;
+            document.getElementById("display-height").value = height;
+            document.getElementById("safe-width").value = Math.round(window.innerWidth || width);
+            document.getElementById("safe-height").value = Math.round(window.innerHeight || height);
+          }});
+        }})();
         </script>
         """
         return html_page("Input Settings", body)
@@ -1687,6 +2175,28 @@ class BitcadeApp:
             },
         }
         self.set_setting("cabinet_profile", json.dumps(profile))
+
+    def update_install_profile(self, form: dict[str, list[str]]) -> None:
+        width = int(first_form_value(form, "display_width", str(DEFAULT_DISPLAY_WIDTH)) or DEFAULT_DISPLAY_WIDTH)
+        height = int(first_form_value(form, "display_height", str(DEFAULT_DISPLAY_HEIGHT)) or DEFAULT_DISPLAY_HEIGHT)
+        safe_width = int(first_form_value(form, "safe_width", str(width)) or width)
+        safe_height = int(first_form_value(form, "safe_height", str(height)) or height)
+        target_fps = int(first_form_value(form, "target_fps", "60") or "60")
+        scaling_policy = first_form_value(form, "scaling_policy", "fit").strip() or "fit"
+        exit_hold = float(first_form_value(form, "exit_hold_seconds", "3") or "3")
+        if min(width, height, safe_width, safe_height, target_fps) <= 0:
+            raise ValueError("Display dimensions and FPS must be positive.")
+        if scaling_policy not in DISPLAY_SCALING_MODES:
+            raise ValueError("Unsupported scaling policy.")
+        profile = self.default_install_profile()
+        profile["display"] = {
+            "resolution": {"width": width, "height": height},
+            "safeViewport": {"width": safe_width, "height": safe_height},
+            "scalingPolicy": scaling_policy,
+            "targetFps": target_fps,
+        }
+        profile["gameControls"]["system"]["exitToMenu"]["holdSeconds"] = exit_hold
+        self.set_setting("install_profile", json.dumps(profile))
 
     def render_status_actions(self, game: dict[str, Any]) -> str:
         actions = []
@@ -1710,13 +2220,30 @@ class BitcadeApp:
             f'<option value="{html.escape(platform)}"{" selected" if platform == game["platform"] else ""}>{html.escape(platform)}</option>'
             for platform in sorted(SUPPORTED_PLATFORMS)
         )
+        display_width = game.get("display_width") or DEFAULT_DISPLAY_WIDTH
+        display_height = game.get("display_height") or DEFAULT_DISPLAY_HEIGHT
+        display_scaling = game.get("display_scaling") or "fit"
+        speed_model = game.get("speed_model") or "delta-time"
+        scaling_options = "".join(
+            f'<option value="{html.escape(mode)}"{" selected" if mode == display_scaling else ""}>{html.escape(mode)}</option>'
+            for mode in sorted(DISPLAY_SCALING_MODES)
+        )
+        speed_options = "".join(
+            f'<option value="{html.escape(model)}"{" selected" if model == speed_model else ""}>{html.escape(model)}</option>'
+            for model in sorted(SPEED_MODELS)
+        )
+        thumbnail_preview = self.render_thumbnail(game)
         body = f"""
         <section class="hero compact">
           <p class="eyebrow">Edit pending package</p>
           <h1>{html.escape(game['title'])}</h1>
           <p>Update display metadata before approving the game for the arcade menu.</p>
         </section>
-        <form class="panel edit-form" action="/admin/games/{html.escape(game['id'])}/edit" method="post">
+        <form class="panel edit-form" action="/admin/games/{html.escape(game['id'])}/edit" method="post" enctype="multipart/form-data">
+          <div class="thumbnail-edit">
+            {thumbnail_preview}
+            <label>Thumbnail <input type="file" name="thumbnail" accept="image/png,image/jpeg,image/gif,image/webp"></label>
+          </div>
           <label>Title <input name="title" value="{html.escape(game['title'])}" required></label>
           <label>Authors <textarea name="authors" required>{html.escape(chr(10).join(game['authors']))}</textarea></label>
           <label>Platform <select name="platform">{platform_options}</select></label>
@@ -1733,6 +2260,15 @@ class BitcadeApp:
             <label><input type="checkbox" name="requires_keyboard" {"checked" if game['requires_keyboard'] else ""}> Requires keyboard</label>
             <label><input type="checkbox" name="requires_mouse" {"checked" if game['requires_mouse'] else ""}> Requires mouse</label>
             <label><input type="checkbox" name="supports_gamepad" {"checked" if game['supports_gamepad'] else ""}> Supports gamepad</label>
+          </div>
+          <h2>Display</h2>
+          <div class="field-row">
+            <label>Viewport width <input type="number" name="display_width" min="1" value="{html.escape(str(display_width))}" required></label>
+            <label>Viewport height <input type="number" name="display_height" min="1" value="{html.escape(str(display_height))}" required></label>
+          </div>
+          <div class="field-row">
+            <label>Scaling <select name="display_scaling">{scaling_options}</select></label>
+            <label>Speed model <select name="speed_model">{speed_options}</select></label>
           </div>
           <div class="form-actions">
             <button class="button" type="submit">Save metadata</button>
@@ -1753,6 +2289,16 @@ class BitcadeApp:
         if game is None:
             return self.not_found(start_response)
         return self.serve_file(start_response, self.games_dir / game_id / filename)
+
+    def serve_thumbnail(self, start_response, filename: str):
+        safe_name = Path(safe_url_path(filename)).name
+        if Path(safe_name).suffix.lower() not in THUMBNAIL_EXTENSIONS:
+            return self.not_found(start_response)
+        with self.connect() as conn:
+            game = conn.execute("SELECT 1 FROM games WHERE thumbnail_path = ?", (safe_name,)).fetchone()
+        if game is None:
+            return self.not_found(start_response)
+        return self.serve_file(start_response, self.thumbnails_dir / safe_name)
 
     def serve_static(self, start_response, filename: str):
         return self.serve_file(start_response, STATIC_DIR / safe_url_path(filename))

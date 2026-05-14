@@ -10,6 +10,8 @@ Bitcade is planned as a local classroom arcade manager: upload a student game pa
 This repo now includes a small Python browser arcade MVP:
 
 - `http://localhost:8080/play` lists approved local games.
+- `http://localhost:8080/student` lets students submit packages with the
+  short upload code shown on the Bitcade play screen.
 - `http://localhost:8080/admin` shows installed game records and confirms the runtime data directory.
 - Sample games live in `samples/games/` and seed into the local data directory on first run.
 - Runtime state is intentionally outside git. Use `.env.example` for local settings and see the install strategy for Raspberry Pi deployment.

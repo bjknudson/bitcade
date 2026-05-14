@@ -26,6 +26,9 @@ Implementation notes:
   with `contain` behavior so the full game is always visible.
 - Add `bitcade.json` display metadata such as preferred width, preferred height,
   aspect ratio, and launch mode: `fullscreen` or `fit`.
+- Show the local Bitcade install profile on admin upload/help pages so students
+  can see the target screen size, menu controls, gameplay controls, and
+  return-to-menu behavior before they build around the wrong assumptions.
 - In kiosk mode, prefer the browser fullscreen API or Chromium fullscreen flags;
   outside kiosk mode, center the fitted game window within the available browser
   viewport.
@@ -83,12 +86,14 @@ Add:
 - Saved cabinet profiles.
 - Player 1 and player 2 mappings.
 - System exit/menu combo.
+- Exportable install profile for students and development tools.
 
 Implementation notes:
 
 - Store a cabinet input profile in the local settings table.
 - Use the browser Gamepad API to detect connected controllers from the admin
   input page.
+- Detect or record the Bitcade display resolution and safe gameplay viewport.
 - Let controllers navigate Bitcade menu/admin controls with directional input
   and an activate button.
 - For browser games, translate configured gamepad bindings into the key events
@@ -96,6 +101,9 @@ Implementation notes:
 - For native Python/Pygame games, leave controller reads to pygame for now; the
   shared Bitcade profile still documents the expected cabinet mapping.
 - Hold the configured system combo to return from a browser game to the menu.
+- Provide copy/export buttons for the local install profile as JSON, Markdown,
+  and an AI prompt block that students can paste into p5.js, pygame, or other
+  development environments.
 
 Outcome: Bitcade can handle keyboard and controller-based cabinet setups more reliably.
 

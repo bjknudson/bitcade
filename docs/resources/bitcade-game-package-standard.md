@@ -41,6 +41,10 @@ my-pygame-game/
 | `main.py` or another `.py` entry | Python/Pygame only | Native Python entry point for the game. |
 | `thumbnail.png` | Preferred | Arcade menu artwork. Use a default placeholder if omitted in early builds. |
 
+Admin and student upload forms may also accept a separate thumbnail image. A
+separate upload overrides the thumbnail bundled inside the game package and can
+be replaced later from the admin edit page.
+
 ### Student export requirement
 
 Students should export or wrap projects so the package can be opened from `index.html` and played offline. Any required libraries, images, sounds, fonts, or generated files must be included inside the package.
@@ -83,7 +87,7 @@ folder with required files and fill-in placeholders where practical.
 
 A package must include `bitcade.json` at the top of the game folder.
 
-### Required fields
+### Fields
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
@@ -96,6 +100,7 @@ A package must include `bitcade.json` at the top of the game folder.
 | `credits` | array of strings | Yes | Credits for design, art, sound, code, and other assets. |
 | `players` | object | Yes | Player count and mode. |
 | `input` | object | Yes | Keyboard, mouse, gamepad, and shared-keyboard requirements. |
+| `display` | object | Recommended | Intended game viewport and scaling assumptions. |
 | `controls` | object | Yes | Game-specific key mapping for virtual Bitcade controls. |
 
 ### Example
@@ -122,6 +127,12 @@ A package must include `bitcade.json` at the top of the game folder.
     "requiresMouse": false,
     "supportsGamepad": false,
     "allowsSharedKeyboard": true
+  },
+  "display": {
+    "width": 1900,
+    "height": 1080,
+    "scaling": "fit",
+    "speedModel": "delta-time"
   },
   "controls": {
     "player1": {
@@ -177,7 +188,33 @@ The arcade menu should use these values to show simple indicators such as:
 | `input.supportsGamepad` | boolean | Yes | The game can use a gamepad. |
 | `input.allowsSharedKeyboard` | boolean | Recommended | Multiple players can share one keyboard safely. |
 
-## 7. Virtual Bitcade controls
+## 7. Display and timing metadata
+
+Games should declare the viewport they were designed around. Bitcade can fit a
+game to the local screen, but the game should not make core speed,
+responsiveness, or collision behavior depend on a different number of pixels
+than the install uses.
+
+Recommended `display` fields:
+
+| Field | Type | Purpose |
+| --- | --- | --- |
+| `display.width` | integer | Intended gameplay viewport width in pixels. |
+| `display.height` | integer | Intended gameplay viewport height in pixels. |
+| `display.scaling` | string | `fullscreen`, `fit`, `integer-fit`, or `fixed`. |
+| `display.speedModel` | string | `delta-time`, `viewport-scaled`, or `fixed-pixels`. |
+
+Use `delta-time` or `viewport-scaled` for new games. `fixed-pixels` is allowed
+only when the game is intentionally tied to one exact viewport and should be
+flagged during review if it will feel wrong on the local Bitcade install.
+
+The Bitcade admin upload page should compare this metadata against the local
+install profile. If the install profile says the safe viewport is `1900x1080`
+and a package declares `800x480`, the preview screen should warn the teacher
+that the game may play faster, slower, or less responsively unless the game code
+scales movement and collision math correctly.
+
+## 8. Virtual Bitcade controls
 
 Bitcade standardizes physical controls into virtual controls.
 
@@ -207,7 +244,7 @@ receive translated key events from the launcher when a controller is used.
 Python/Pygame games should read controller input through pygame and follow the
 same virtual-control expectations.
 
-## 8. Control mapping format
+## 9. Control mapping format
 
 Use `controls.player1`, `controls.player2`, and `controls.system` to describe the keys the game expects.
 
@@ -232,7 +269,32 @@ Use `controls.player1`, `controls.player2`, and `controls.system` to describe th
 
 For one-player games, `controls.player2` may be omitted. System controls should still be documented so the runtime can preserve a reliable return-to-menu path.
 
-## 9. Allowed and blocked file types
+## 10. Local install profile compatibility
+
+`bitcade.json` describes what the game expects. The local install profile
+describes what a specific Bitcade machine provides. Upload and edit pages should
+show both side by side:
+
+- Game display assumptions from `display`.
+- Local safe viewport from the install profile.
+- Game controls from `controls`.
+- Local keyboard, gamepad, and cabinet mappings from the install profile.
+- System return-to-menu behavior.
+
+When students are starting a project, they should copy the install profile from
+Bitcade and use it as their target. For example, a development prompt or project
+brief can say:
+
+```text
+Target Bitcade install: 1900x1080 safe viewport. Menu uses Arrow keys and
+Space/Enter. Player 1 uses Arrow keys, Space, Shift, and Enter. Escape held for
+3 seconds exits to the Bitcade menu. Use delta time or viewport-scaled movement.
+```
+
+This copied profile is not a replacement for `bitcade.json`; it is a starting
+contract that helps the game match the machine before upload.
+
+## 11. Allowed and blocked file types
 
 Browser packages allow static browser-game assets only. Python/Pygame packages additionally allow `.py` files, but Bitcade does not install per-game Python dependencies from uploaded packages.
 
@@ -275,7 +337,7 @@ Browser packages allow static browser-game assets only. Python/Pygame packages a
 
 Blocked types may be supported later only through explicit advanced adapters. Python/Pygame packages must not include `requirements.txt`, `pyproject.toml`, `setup.py`, or `setup.cfg`; the Pi installer provides the supported pygame runtime.
 
-## 10. Validation requirements
+## 12. Validation requirements
 
 Bitcade should reject or flag packages that violate these rules:
 
@@ -287,13 +349,15 @@ Bitcade should reject or flag packages that violate these rules:
 - File paths are absolute.
 - File paths contain traversal such as `../`.
 - Required metadata fields are missing or empty.
+- Display metadata is missing, mismatched with the local install profile, or
+  declares `fixed-pixels` without a teacher-approved reason.
 - `platform` is not supported.
 - Player count is invalid, such as `min` below `1` or `max` below `min`.
 - File extension is blocked or unknown.
 - Hidden system junk is used as a required package file.
 - Player controls conflict in a way that makes a two-player game unplayable unless shared controls are intentional and documented.
 
-## 11. Approval status
+## 13. Approval status
 
 Package validation and teacher approval are separate steps.
 
@@ -306,7 +370,7 @@ Package validation and teacher approval are separate steps.
 
 Students should be able to submit packages for review. They should not be able to publish directly to the arcade menu.
 
-## 12. Adapter expectations
+## 14. Adapter expectations
 
 The first adapter is the browser game adapter. It should:
 

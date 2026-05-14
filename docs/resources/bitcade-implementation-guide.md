@@ -81,6 +81,7 @@ Bitcade Device
 │   ├── validate files
 │   ├── edit metadata
 │   ├── configure controls
+│   ├── export local install profile
 │   ├── preview game
 │   ├── approve / hide / archive
 │   └── manage library
@@ -103,6 +104,12 @@ Bitcade Device
 │   ├── player 1 controls
 │   ├── player 2 controls
 │   └── menu/exit override
+├── Install Profile
+│   ├── display resolution
+│   ├── safe game viewport
+│   ├── menu navigation controls
+│   ├── gameplay control map
+│   └── export/copy formats
 └── Local Runtime
     ├── Chromium kiosk mode
     ├── local file server
@@ -189,6 +196,7 @@ The `/play` menu should include:
 - Most played games.
 - Game details page.
 - Credits and license view.
+- Thumbnail artwork on each game card and details page.
 
 Example game card:
 
@@ -202,6 +210,11 @@ p5.js
 Controllers can navigate the menu through the browser Gamepad API. Directional
 input moves focus among links and buttons, and the primary action or start
 button activates the focused control.
+
+Each game card should be one large selectable target. Focus, hover, and
+controller navigation should highlight the whole card, not only a small launch
+button inside the card. Selecting a card opens the game details page, where the
+launch action, credits, license, thumbnail, and metadata can be shown clearly.
 
 ## 10. Kiosk behavior
 
@@ -262,7 +275,103 @@ events declared in the game's `bitcade.json` controls. Python/Pygame games read
 controllers directly through pygame for now, but should use the same documented
 cabinet mapping.
 
-## 13. Admin interface
+## 13. Local install profile and export
+
+Each Bitcade install should expose a local install profile. This profile
+describes the actual machine students are targeting, not a generic arcade
+assumption. The goal is to keep early game prototypes from being tuned for the
+wrong pixel count, aspect ratio, or input layout.
+
+The admin upload pages and platform-specific upload guides should show the
+current install profile in a copyable panel. The profile should include:
+
+- Display resolution reported by the kiosk browser or OS.
+- Safe gameplay viewport after Bitcade menu chrome, launcher shell, scaling, or
+  fullscreen behavior is considered.
+- Expected game coordinate system, such as `1900x1080` or `800x480`.
+- Menu navigation controls, such as arrow keys for focus movement and
+  `Space`/`Enter` for activation.
+- Player 1 and player 2 gameplay controls.
+- Connected gamepads or cabinet buttons detected during setup.
+- System return-to-menu control and hold duration.
+- Scaling policy: `fullscreen`, `fit`, integer scale where possible, or fixed
+  viewport.
+- Frame-rate target and timing guidance, such as "movement must use delta time
+  or normalized speed, not pixels per frame tied to one resolution."
+
+Example JSON export:
+
+```json
+{
+  "bitcadeInstallProfileVersion": 1,
+  "display": {
+    "resolution": { "width": 1900, "height": 1080 },
+    "safeViewport": { "width": 1900, "height": 1080 },
+    "scalingPolicy": "fit",
+    "targetFps": 60
+  },
+  "menuControls": {
+    "up": "ArrowUp",
+    "down": "ArrowDown",
+    "left": "ArrowLeft",
+    "right": "ArrowRight",
+    "select": ["Space", "Enter"]
+  },
+  "gameControls": {
+    "player1": {
+      "up": "ArrowUp",
+      "down": "ArrowDown",
+      "left": "ArrowLeft",
+      "right": "ArrowRight",
+      "a": "Space",
+      "b": "Shift",
+      "start": "Enter"
+    },
+    "system": {
+      "exitToMenu": {
+        "keys": ["Escape"],
+        "holdSeconds": 3
+      }
+    }
+  },
+  "connectedInputDevices": [
+    {
+      "type": "keyboard",
+      "name": "Default keyboard"
+    }
+  ],
+  "developerGuidance": [
+    "Design gameplay around the safe viewport.",
+    "Scale positions, collision bounds, and speed from the viewport size.",
+    "Use elapsed time or delta time for movement instead of fixed pixels per frame.",
+    "Do not use Tab as an in-game action because Bitcade/browser focus may use it."
+  ]
+}
+```
+
+The export panel should offer at least three copy formats:
+
+- **JSON** for direct import into tools or code.
+- **Markdown** for student instructions and assignment pages.
+- **AI prompt block** that describes the screen, controls, exit behavior, and
+  scaling rules in plain language for development assistants.
+
+Example AI prompt block:
+
+```text
+Build this game for a Bitcade install with a 1900x1080 safe gameplay viewport.
+Use Arrow keys for movement, Space for the main action, Enter for start/select,
+and Escape held for 3 seconds to exit back to the Bitcade menu. Keep gameplay
+speed independent of resolution by using delta time or scaling movement from the
+viewport size. Do not rely on Tab for gameplay.
+```
+
+Bitcade should refresh the detected profile when the kiosk starts and whenever
+an admin opens the input/display setup page. Admins should be able to override
+detected values when a display reports an unusual resolution or when the class
+uses a deliberate target viewport smaller than the physical screen.
+
+## 14. Admin interface
 
 Teacher/admin features should include:
 
@@ -276,6 +385,7 @@ Teacher/admin features should include:
 - Edit controls.
 - Assign platform.
 - Assign player count.
+- View and export install profile.
 - View errors.
 - Delete broken uploads.
 - Restart kiosk.

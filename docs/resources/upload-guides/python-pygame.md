@@ -16,14 +16,22 @@ Create one zip file with one top-level folder:
 my-pygame-game/
   bitcade.json
   main.py
+  thumbnail.png
   assets/
     player.png
     hit.wav
 ```
 
+You may include `thumbnail.png` in the package or upload a separate thumbnail
+image on the Bitcade upload page. The thumbnail appears on the arcade menu card
+and the game info page.
+
 ## Metadata
 
 Use `platform: "python-pygame"` and point `entry` at the Python file to run.
+Copy the current Bitcade install profile from the admin upload page before
+choosing the pygame window size. Use the safe viewport as the target resolution
+unless your teacher gives the class a smaller fixed size.
 
 ```json
 {
@@ -44,6 +52,12 @@ Use `platform: "python-pygame"` and point `entry` at the Python file to run.
     "requiresMouse": false,
     "supportsGamepad": false,
     "allowsSharedKeyboard": true
+  },
+  "display": {
+    "width": 1900,
+    "height": 1080,
+    "scaling": "fit",
+    "speedModel": "delta-time"
   },
   "controls": {
     "player1": {
@@ -68,6 +82,8 @@ Use `platform: "python-pygame"` and point `entry` at the Python file to run.
 - Use a normal pygame event loop.
 - Exit cleanly when Escape or the window close event is received.
 - Load assets with paths relative to the game folder.
+- Use `clock.tick()` with elapsed time or another delta-time approach for
+  movement so gameplay speed is not tied to one pixel resolution.
 - Do not include `requirements.txt`, `pyproject.toml`, `setup.py`, or `setup.cfg`.
 - Do not shell out to other programs.
 

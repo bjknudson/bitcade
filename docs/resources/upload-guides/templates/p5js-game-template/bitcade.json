@@ -20,6 +20,12 @@
     "supportsGamepad": false,
     "allowsSharedKeyboard": false
   },
+  "display": {
+    "width": 1900,
+    "height": 1080,
+    "scaling": "fit",
+    "speedModel": "delta-time"
+  },
   "controls": {
     "player1": {
       "up": "ArrowUp",
