@@ -120,3 +120,28 @@ textarea { min-height: 7rem; resize: vertical; }
   .form-grid, .field-row, .game-info, .thumbnail-edit { grid-template-columns: 1fr; }
   .actions { min-width: 0; }
 }
+.brand { display: inline-flex; align-items: center; gap: 0.6rem; }
+.brand-logo { width: 2.25rem; height: 2.25rem; object-fit: contain; border-radius: 0.35rem; }
+.branded-hero { position: relative; }
+.hero-mark { max-width: min(14rem, 40vw); max-height: 8rem; object-fit: contain; margin-bottom: 1rem; filter: drop-shadow(0 1rem 1.4rem rgba(0, 0, 0, 0.28)); }
+.layout-compact main { padding-top: 1rem; }
+.layout-compact .hero h1 { font-size: clamp(2rem, 5vw, 4rem); }
+.layout-compact .grid { grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 0.8rem; }
+.layout-showcase .arcade-menu { max-width: 112rem; }
+.layout-showcase .grid { grid-template-columns: repeat(auto-fit, minmax(24rem, 1fr)); }
+.layout-showcase .game-card { display: grid; grid-template-columns: minmax(12rem, 45%) 1fr; }
+.layout-showcase .thumbnail { min-height: 100%; }
+.branding-form .asset-preview { min-height: 6rem; display: grid; place-items: center; padding: 0.8rem; border: 1px dashed rgba(255, 255, 255, 0.24); border-radius: 0.8rem; background: rgba(0, 0, 0, 0.18); color: var(--muted); }
+.asset-preview img { max-width: 100%; max-height: 7rem; object-fit: contain; }
+.logo-fields { grid-template-columns: minmax(10rem, 14rem) minmax(12rem, 1fr); align-items: center; }
+.logo-fields span { display: flex; align-items: center; gap: 0.45rem; font-weight: 700; }
+.layout-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 0.8rem; }
+.option-card { display: flex; align-items: flex-start; gap: 0.7rem; padding: 0.85rem; border: 1px solid rgba(255, 255, 255, 0.16); border-radius: 0.8rem; background: rgba(255, 255, 255, 0.06); }
+.option-card input { width: auto; margin-top: 0.2rem; }
+.option-card span { display: grid; gap: 0.25rem; }
+.color-fields { grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); }
+.color-fields input { min-height: 3rem; padding: 0.25rem; }
+.brand-preview { margin-top: 0.5rem; }
+@media (max-width: 820px) {
+  .layout-showcase .game-card, .logo-fields { grid-template-columns: 1fr; }
+}

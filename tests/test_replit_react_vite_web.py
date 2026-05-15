@@ -206,6 +206,61 @@ class ReplitReactViteWebTests(unittest.TestCase):
         self.assertEqual(files["package"]["file"].read(), payload)
         files["package"]["file"].close()
 
+    def test_branding_settings_update_menu_copy_and_colors(self) -> None:
+        form = {
+            "install_name": ["Lincoln Arcade"],
+            "site_title": ["Lincoln Games"],
+            "tagline": ["Play student projects"],
+            "welcome_text": ["Games from period 3."],
+            "student_upload_label": ["Class code"],
+            "layout": ["compact"],
+            "palette": ["school"],
+            "color_background": ["#001122"],
+            "color_panel": ["#112233"],
+            "color_panel_2": ["#223344"],
+            "color_text": ["#ffffff"],
+            "color_muted": ["#ccddee"],
+            "color_accent": ["#44ccff"],
+            "color_accent_2": ["#ffaa00"],
+        }
+
+        self.app.update_branding_settings(form, {})
+
+        branding = self.app.branding()
+        self.assertEqual(branding["install_name"], "Lincoln Arcade")
+        self.assertEqual(branding["layout"], "compact")
+        self.assertEqual(branding["colors"]["background"], "#001122")
+        rendered = self.app.render_play().decode("utf-8")
+        self.assertIn("Lincoln Arcade", rendered)
+        self.assertIn("Play student projects", rendered)
+        self.assertIn("Class code", rendered)
+        self.assertIn("--bg: #001122", rendered)
+        self.assertIn("layout-compact", rendered)
+
+    def test_branding_logo_upload_is_served_when_selected(self) -> None:
+        form = {
+            "install_name": ["Bitcade"],
+            "site_title": ["Bitcade"],
+            "tagline": ["Choose a local game"],
+            "welcome_text": ["Welcome"],
+            "student_upload_label": ["Student upload code"],
+            "layout": ["arcade"],
+            "palette": ["classic"],
+            "color_background": ["#111426"],
+            "color_panel": ["#1c2140"],
+            "color_panel_2": ["#252b52"],
+            "color_text": ["#f8fbff"],
+            "color_muted": ["#b7c1d9"],
+            "color_accent": ["#61f0c1"],
+            "color_accent_2": ["#ffcf5a"],
+        }
+        upload = {"filename": "school.png", "content": b"png-bytes"}
+
+        self.app.update_branding_settings(form, {"logo": upload})
+
+        self.assertEqual(self.app.branding()["logo_path"], "logo.png")
+        self.assertEqual((self.app.branding_dir / "logo.png").read_bytes(), b"png-bytes")
+
 
 if __name__ == "__main__":
     unittest.main()
