@@ -117,6 +117,18 @@ class ReplitReactViteWebTests(unittest.TestCase):
 
         self.assertEqual(entry, "artifacts/rocket-league-2d/dist/public/index.html")
 
+    def test_verify_workspace_relative_services_public_dir(self) -> None:
+        workspace = self.make_workspace()
+        artifact = self.app.select_replit_artifact(workspace)
+        artifact["metadata"] = {"services": {"production": {"publicDir": "artifacts/rocket-league-2d/dist/public"}}}
+        output = workspace / "artifacts" / "rocket-league-2d" / "dist" / "public"
+        output.mkdir(parents=True)
+        (output / "index.html").write_text("<!doctype html>", encoding="utf-8")
+
+        entry = self.app.verify_replit_static_output(workspace, artifact, require_existing=True)
+
+        self.assertEqual(entry, "artifacts/rocket-league-2d/dist/public/index.html")
+
     def test_missing_output_fails(self) -> None:
         workspace = self.make_workspace()
         artifact = self.app.select_replit_artifact(workspace)
@@ -129,6 +141,9 @@ class ReplitReactViteWebTests(unittest.TestCase):
         with zipfile.ZipFile(zip_path, "w") as archive:
             archive.writestr("Goal-Defender/pnpm-workspace.yaml", "packages:\n  - artifacts/*\n")
             archive.writestr("Goal-Defender/pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
+            archive.writestr("Goal-Defender/.gitignore", ".local\nnode_modules\n")
+            archive.writestr("Goal-Defender/.replitignore", ".local\n")
+            archive.writestr("Goal-Defender/.npmrc", "shared-workspace-lockfile=true\n")
             archive.writestr("Goal-Defender/node_modules/large-package/file.js", "ignored")
             archive.writestr("Goal-Defender/.git/config", "ignored")
             archive.writestr("Goal-Defender/artifacts/rocket-league-2d/package.json", json.dumps({"name": "@workspace/rocket-league-2d"}))

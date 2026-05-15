@@ -71,7 +71,7 @@ ALLOWED_PACKAGE_EXTENSIONS = {
     ".ttf",
     ".otf",
 }
-ALLOWED_PACKAGE_FILENAMES = {".replit", "pnpm-lock.yaml", "pnpm-workspace.yaml", "package.json"}
+ALLOWED_PACKAGE_FILENAMES = {".gitignore", ".npmrc", ".replit", ".replitignore", "pnpm-lock.yaml", "pnpm-workspace.yaml", "package.json"}
 BLOCKED_PACKAGE_EXTENSIONS = {".exe", ".dmg", ".pkg", ".sh", ".command", ".bat", ".app", ".jar"}
 IGNORED_PACKAGE_NAMES = {".ds_store", "thumbs.db"}
 EXCLUDED_IMPORT_DIR_NAMES = {".git", ".agents", ".local", "node_modules"}
@@ -1833,11 +1833,18 @@ class BitcadeApp:
     def verify_replit_static_output(self, workspace_root: Path, artifact: dict[str, Any], *, require_existing: bool) -> str:
         artifact_root = workspace_root / safe_package_path(str(artifact["root"]))
         metadata = artifact.get("metadata") if isinstance(artifact.get("metadata"), dict) else {}
+        services = metadata.get("services", {}) if isinstance(metadata.get("services"), dict) else {}
         production = metadata.get("production", {}) if isinstance(metadata.get("production"), dict) else {}
+        if isinstance(services.get("production"), dict):
+            production = services["production"]
         configured_public_dir = str(production.get("publicDir") or "").strip()
         candidates = []
         if configured_public_dir:
-            candidates.append(artifact_root / safe_package_path(configured_public_dir))
+            safe_public_dir = safe_package_path(configured_public_dir)
+            public_path = workspace_root / safe_public_dir
+            if not public_path.exists() and not safe_public_dir.startswith(f"{artifact['root']}/"):
+                public_path = artifact_root / safe_public_dir
+            candidates.append(public_path)
         candidates.extend([artifact_root / "dist" / "public", artifact_root / "dist"])
         for public_dir in candidates:
             index_path = public_dir / "index.html"
