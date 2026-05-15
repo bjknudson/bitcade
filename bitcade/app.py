@@ -172,6 +172,7 @@ DEFAULT_PLAY_LAYOUT = {
     "card_min_width": 288,
     "grid_gap": 19,
     "hero_scale": 100,
+    "hero_text_width": 1536,
     "thumbnail_ratio": "16 / 9",
 }
 
@@ -396,26 +397,30 @@ def json_list_from_text(value: str) -> list[str]:
 def key_event_init(key_name: str) -> dict[str, Any]:
     key_name = str(key_name).strip()
     aliases = {
-        "Left Shift": ("Shift", "ShiftLeft"),
-        "Right Shift": ("Shift", "ShiftRight"),
-        "Shift": ("Shift", "ShiftLeft"),
-        "Space": (" ", "Space"),
-        "Enter": ("Enter", "Enter"),
-        "Escape": ("Escape", "Escape"),
-        "ArrowUp": ("ArrowUp", "ArrowUp"),
-        "ArrowDown": ("ArrowDown", "ArrowDown"),
-        "ArrowLeft": ("ArrowLeft", "ArrowLeft"),
-        "ArrowRight": ("ArrowRight", "ArrowRight"),
+        "Left Shift": ("Shift", "ShiftLeft", 16),
+        "Right Shift": ("Shift", "ShiftRight", 16),
+        "Shift": ("Shift", "ShiftLeft", 16),
+        "Space": (" ", "Space", 32),
+        "Enter": ("Enter", "Enter", 13),
+        "Escape": ("Escape", "Escape", 27),
+        "ArrowUp": ("ArrowUp", "ArrowUp", 38),
+        "ArrowDown": ("ArrowDown", "ArrowDown", 40),
+        "ArrowLeft": ("ArrowLeft", "ArrowLeft", 37),
+        "ArrowRight": ("ArrowRight", "ArrowRight", 39),
+        "Slash": ("/", "Slash", 191),
+        "Period": (".", "Period", 190),
     }
     if key_name in aliases:
-        key, code = aliases[key_name]
+        key, code, key_code = aliases[key_name]
     elif len(key_name) == 1 and key_name.isalpha():
         key = key_name.lower()
         code = f"Key{key_name.upper()}"
+        key_code = ord(key_name.upper())
     else:
         key = key_name
         code = key_name
-    return {"key": key, "code": code}
+        key_code = 0
+    return {"key": key, "code": code, "keyCode": key_code, "which": key_code}
 
 
 def render_markdown_reference(markdown: str) -> str:
@@ -501,6 +506,7 @@ def css_variable_block(branding: dict[str, Any] | None) -> str:
         "content_width": "--play-max-width",
         "card_min_width": "--play-card-min",
         "grid_gap": "--play-grid-gap",
+        "hero_text_width": "--play-hero-text-width",
     }
     for key, variable in pixel_variables.items():
         try:
@@ -813,7 +819,11 @@ def game_input_script(profile: dict[str, Any], controls: dict[str, Any], return_
 
           const dispatch = (target, type, init) => {{
             const eventInit = {{ ...init, bubbles: true, cancelable: true }};
-            target.dispatchEvent(new KeyboardEvent(type, eventInit));
+            const event = new KeyboardEvent(type, eventInit);
+            for (const field of ["keyCode", "which"]) {{
+              if (eventInit[field]) Object.defineProperty(event, field, {{ get: () => eventInit[field] }});
+            }}
+            target.dispatchEvent(event);
           }};
 
           const setKey = (id, isDown, init) => {{
@@ -1319,6 +1329,12 @@ class BitcadeApp:
         if path == "/admin/input":
             query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
             return self.response(start_response, "200 OK", self.render_input_settings(first_form_value(query, "message"), first_form_value(query, "level", "info")))
+        if path == "/admin/input/display":
+            query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+            return self.response(start_response, "200 OK", self.render_display_input_settings(first_form_value(query, "message"), first_form_value(query, "level", "info")))
+        if path == "/admin/input/gamepad":
+            query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+            return self.response(start_response, "200 OK", self.render_gamepad_input_settings(first_form_value(query, "message"), first_form_value(query, "level", "info")))
         if path == "/admin/branding":
             query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
             return self.response(start_response, "200 OK", self.render_branding_settings(first_form_value(query, "message"), first_form_value(query, "level", "info")))
@@ -1347,11 +1363,11 @@ class BitcadeApp:
             if path == "/admin/input":
                 form = self.parse_urlencoded(environ)
                 self.update_input_settings(form)
-                return self.redirect(start_response, "/admin/input?message=Input%20settings%20updated.")
+                return self.redirect(start_response, "/admin/input/gamepad?message=Input%20settings%20updated.")
             if path == "/admin/install-profile":
                 form = self.parse_urlencoded(environ)
                 self.update_install_profile(form)
-                return self.redirect(start_response, "/admin/input?message=Install%20profile%20updated.")
+                return self.redirect(start_response, "/admin/input/display?message=Install%20profile%20updated.")
             if path == "/admin/branding":
                 content_length = int(environ.get("CONTENT_LENGTH") or 0)
                 fields, files = self.parse_multipart(environ, content_length)
@@ -2972,13 +2988,41 @@ class BitcadeApp:
         return self.html_page("Admin", body)
 
     def render_input_settings(self, message: str = "", level: str = "info") -> bytes:
-        profile = self.cabinet_profile()
+        alert = f'<p class="notice {html.escape(level)}">{html.escape(message)}</p>' if message else ""
+        body = f"""
+        <section class="hero compact">
+          <p class="eyebrow">Phase 4 input</p>
+          <h1>Input settings</h1>
+          <p>Configure the cabinet display target and controller mappings from dedicated setup screens.</p>
+        </section>
+        {alert}
+        <section class="grid settings-grid">
+          <a class="card guide-card settings-card" href="/admin/input/display">
+            <div class="card-body">
+              <p class="eyebrow">Display</p>
+              <h2>Display profile</h2>
+              <p>Set screen resolution, safe viewport, scaling, FPS, and the system exit hold time students should target.</p>
+            </div>
+          </a>
+          <a class="card guide-card settings-card" href="/admin/input/gamepad">
+            <div class="card-body">
+              <p class="eyebrow">Controls</p>
+              <h2>Gamepad mapping</h2>
+              <p>Detect connected controllers, inspect recent inputs, and capture bindings into the player mapping fields.</p>
+            </div>
+          </a>
+        </section>
+        <div class="form-actions">
+          <a class="button secondary" href="/admin">Back to admin</a>
+        </div>
+        """
+        return self.html_page("Input Settings", body)
+
+    def render_display_input_settings(self, message: str = "", level: str = "info") -> bytes:
         install_profile = self.install_profile()
         display = install_profile.get("display", {}) if isinstance(install_profile.get("display"), dict) else {}
         resolution = display.get("resolution", {}) if isinstance(display.get("resolution"), dict) else {}
         viewport = display.get("safeViewport", {}) if isinstance(display.get("safeViewport"), dict) else {}
-        players = profile.get("players", {})
-        system = profile.get("system", {})
         alert = f'<p class="notice {html.escape(level)}">{html.escape(message)}</p>' if message else ""
         scaling_policy = str(display.get("scalingPolicy", "fit"))
         scaling_options = "".join(
@@ -2986,23 +3030,11 @@ class BitcadeApp:
             for mode in sorted(DISPLAY_SCALING_MODES)
         )
 
-        def value(player: str, control: str) -> str:
-            player_profile = players.get(player, {}) if isinstance(players, dict) else {}
-            if not isinstance(player_profile, dict):
-                return ""
-            return html.escape(str(player_profile.get(control, "")))
-
-        def player_fields(player: str) -> str:
-            labels = []
-            for control in VIRTUAL_CONTROLS:
-                labels.append(f'<label>{player.upper()} {control.title()} <input name="{player}_{control}" value="{value(player[-1], control)}"></label>')
-            return "".join(labels)
-
         body = f"""
         <section class="hero compact">
           <p class="eyebrow">Phase 4 input</p>
-          <h1>Input settings</h1>
-          <p>Configure cabinet mappings and check connected controllers from this browser.</p>
+          <h1>Display profile</h1>
+          <p>Set the target display students should build for.</p>
         </section>
         {alert}
         <form class="panel edit-form" action="/admin/install-profile" method="post">
@@ -3026,60 +3058,11 @@ class BitcadeApp:
           <div class="form-actions">
             <button class="button secondary" type="button" id="detect-display">Detect from browser</button>
             <button class="button" type="submit">Save install profile</button>
+            <a class="button secondary" href="/admin/input">Input settings</a>
           </div>
         </form>
         {self.render_install_profile_panel(compact=True)}
-        <section class="panel">
-          <h2>Controller detection</h2>
-          <p id="gamepad-status">Press a button on a connected controller.</p>
-          <ul id="gamepad-list" class="device-list"></ul>
-        </section>
-        <form class="panel edit-form" action="/admin/input" method="post">
-          <label>Profile name <input name="profile_name" value="{html.escape(str(profile.get('name', 'Default gamepad')))}"></label>
-          <h2>Player 1</h2>
-          <div class="field-row input-map">{player_fields('p1')}</div>
-          <h2>Player 2</h2>
-          <div class="field-row input-map">{player_fields('p2')}</div>
-          <h2>System</h2>
-          <div class="field-row">
-            <label>Menu combo <input name="menu_combo" value="{html.escape(str(system.get('menuCombo', 'button:8+button:9')))}"></label>
-            <label>Hold seconds <input type="number" step="0.25" min="0.5" max="10" name="hold_seconds" value="{html.escape(str(system.get('holdSeconds', 2.0)))}"></label>
-          </div>
-          <p>Bindings use <code>button:N</code>, <code>axis:N:-</code>, or <code>axis:N:+</code>. Combos join bindings with <code>+</code>.</p>
-          <div class="form-actions">
-            <button class="button" type="submit">Save input profile</button>
-            <a class="button secondary" href="/admin">Back to admin</a>
-          </div>
-        </form>
         <script>
-        (() => {{
-          const status = document.getElementById("gamepad-status");
-          const list = document.getElementById("gamepad-list");
-          const render = () => {{
-            const gamepads = navigator.getGamepads ? Array.from(navigator.getGamepads()).filter(Boolean) : [];
-            list.innerHTML = "";
-            if (gamepads.length === 0) {{
-              status.textContent = "Press a button on a connected controller.";
-            }} else {{
-              status.textContent = `${{gamepads.length}} controller${{gamepads.length === 1 ? "" : "s"}} detected.`;
-            }}
-            for (const gamepad of gamepads) {{
-              const activeButtons = gamepad.buttons
-                .map((button, index) => button.pressed ? `button:${{index}}` : "")
-                .filter(Boolean)
-                .join(", ");
-              const activeAxes = gamepad.axes
-                .map((axis, index) => Math.abs(axis) > 0.55 ? `axis:${{index}}:${{axis < 0 ? "-" : "+"}}` : "")
-                .filter(Boolean)
-                .join(", ");
-              const item = document.createElement("li");
-              item.textContent = `${{gamepad.index}}: ${{gamepad.id}}${{activeButtons || activeAxes ? ` - ${{[activeButtons, activeAxes].filter(Boolean).join(", ")}}` : ""}}`;
-              list.appendChild(item);
-            }}
-            requestAnimationFrame(render);
-          }};
-          if ("getGamepads" in navigator) requestAnimationFrame(render);
-        }})();
         (() => {{
           const button = document.getElementById("detect-display");
           if (!button) return;
@@ -3094,7 +3077,167 @@ class BitcadeApp:
         }})();
         </script>
         """
-        return self.html_page("Input Settings", body)
+        return self.html_page("Display Input Settings", body)
+
+    def render_gamepad_input_settings(self, message: str = "", level: str = "info") -> bytes:
+        profile = self.cabinet_profile()
+        players = profile.get("players", {})
+        system = profile.get("system", {})
+        alert = f'<p class="notice {html.escape(level)}">{html.escape(message)}</p>' if message else ""
+
+        def value(player: str, control: str) -> str:
+            player_profile = players.get(player, {}) if isinstance(players, dict) else {}
+            if not isinstance(player_profile, dict):
+                return ""
+            return html.escape(str(player_profile.get(control, "")))
+
+        def player_fields(player: str) -> str:
+            labels = []
+            for control in VIRTUAL_CONTROLS:
+                labels.append(f'<label>{player.upper()} {control.title()} <input data-capture-binding name="{player}_{control}" value="{value(player[-1], control)}"></label>')
+            return "".join(labels)
+
+        body = f"""
+        <section class="hero compact">
+          <p class="eyebrow">Phase 4 input</p>
+          <h1>Gamepad mapping</h1>
+          <p>Focus a binding field, then press a controller button or move an axis to capture it.</p>
+        </section>
+        {alert}
+        <div class="input-workspace">
+          <form class="panel edit-form input-profile-form" action="/admin/input" method="post">
+            <label>Profile name <input name="profile_name" value="{html.escape(str(profile.get('name', 'Default gamepad')))}"></label>
+            <h2>Player 1</h2>
+            <div class="field-row input-map">{player_fields('p1')}</div>
+            <h2>Player 2</h2>
+            <div class="field-row input-map">{player_fields('p2')}</div>
+            <h2>System</h2>
+            <div class="field-row">
+              <label>Menu combo <input data-capture-binding name="menu_combo" value="{html.escape(str(system.get('menuCombo', 'button:8+button:9')))}"></label>
+              <label>Hold seconds <input type="number" step="0.25" min="0.5" max="10" name="hold_seconds" value="{html.escape(str(system.get('holdSeconds', 2.0)))}"></label>
+            </div>
+            <p id="capture-status">Select a binding field to capture the next controller input.</p>
+            <p>Bindings use <code>button:N</code>, <code>axis:N:-</code>, or <code>axis:N:+</code>. Combos join bindings with <code>+</code>.</p>
+            <div class="form-actions">
+              <button class="button" type="submit">Save input profile</button>
+              <a class="button secondary" href="/admin/input">Input settings</a>
+              <a class="button secondary" href="/admin">Back to admin</a>
+            </div>
+          </form>
+          <aside class="panel input-sidecard">
+            <h2>Controller detection</h2>
+            <p id="gamepad-status">Press a button on a connected controller.</p>
+            <ul id="gamepad-list" class="device-list"></ul>
+            <h2>Recent inputs</h2>
+            <ol id="input-stream" class="input-stream"></ol>
+          </aside>
+        </div>
+        <script>
+        (() => {{
+          const status = document.getElementById("gamepad-status");
+          const captureStatus = document.getElementById("capture-status");
+          const list = document.getElementById("gamepad-list");
+          const stream = document.getElementById("input-stream");
+          const captureFields = Array.from(document.querySelectorAll("[data-capture-binding]"));
+          const previous = new Set();
+          const recent = [];
+          let activeField = null;
+
+          const describeField = (field) => {{
+            const label = field.closest("label");
+            return label ? label.childNodes[0].textContent.trim() : field.name;
+          }};
+
+          const setCaptureStatus = () => {{
+            if (!captureStatus) return;
+            captureStatus.textContent = activeField
+              ? `Capturing next input for ${{describeField(activeField)}}.`
+              : "Select a binding field to capture the next controller input.";
+          }};
+
+          for (const field of captureFields) {{
+            field.addEventListener("focus", () => {{
+              activeField = field;
+              setCaptureStatus();
+            }});
+          }}
+
+          const pushRecent = (binding, gamepad) => {{
+            recent.unshift({{ binding, gamepad: gamepad.index, time: new Date().toLocaleTimeString() }});
+            recent.splice(10);
+            stream.innerHTML = "";
+            for (const item of recent) {{
+              const row = document.createElement("li");
+              const button = document.createElement("button");
+              button.type = "button";
+              button.dataset.binding = item.binding;
+              button.textContent = item.binding;
+              const meta = document.createElement("span");
+              meta.textContent = `Pad ${{item.gamepad}} · ${{item.time}}`;
+              row.append(button, meta);
+              stream.appendChild(row);
+            }}
+          }};
+
+          stream.addEventListener("click", (event) => {{
+            const button = event.target.closest("button[data-binding]");
+            if (!button || !activeField) return;
+            activeField.value = button.dataset.binding;
+            activeField.focus();
+          }});
+
+          const capture = (binding, gamepad) => {{
+            pushRecent(binding, gamepad);
+            if (!activeField) return;
+            activeField.value = binding;
+            activeField.focus();
+            activeField.select();
+            activeField = null;
+            setCaptureStatus();
+          }};
+
+          const activeBindings = (gamepad) => {{
+            const bindings = [];
+            gamepad.buttons.forEach((button, index) => {{
+              if (button.pressed) bindings.push(`button:${{index}}`);
+            }});
+            gamepad.axes.forEach((axis, index) => {{
+              if (Math.abs(axis) > 0.55) bindings.push(`axis:${{index}}:${{axis < 0 ? "-" : "+"}}`);
+            }});
+            return bindings;
+          }};
+
+          const render = () => {{
+            const gamepads = navigator.getGamepads ? Array.from(navigator.getGamepads()).filter(Boolean) : [];
+            list.innerHTML = "";
+            if (gamepads.length === 0) {{
+              status.textContent = "Press a button on a connected controller.";
+            }} else {{
+              status.textContent = `${{gamepads.length}} controller${{gamepads.length === 1 ? "" : "s"}} detected.`;
+            }}
+            const current = new Set();
+            for (const gamepad of gamepads) {{
+              const bindings = activeBindings(gamepad);
+              const item = document.createElement("li");
+              item.textContent = `${{gamepad.index}}: ${{gamepad.id}}${{bindings.length ? ` - ${{bindings.join(", ")}}` : ""}}`;
+              list.appendChild(item);
+              for (const binding of bindings) {{
+                const key = `${{gamepad.index}}:${{binding}}`;
+                current.add(key);
+                if (!previous.has(key)) capture(binding, gamepad);
+              }}
+            }}
+            previous.clear();
+            for (const key of current) previous.add(key);
+            requestAnimationFrame(render);
+          }};
+
+          setCaptureStatus();
+          if ("getGamepads" in navigator) requestAnimationFrame(render);
+        }})();
+        </script>
+        """
+        return self.html_page("Gamepad Input Settings", body)
 
     def validate_branding_image_upload(self, upload: dict[str, Any]) -> str:
         filename = Path(str(upload.get("filename", ""))).name
@@ -3149,12 +3292,15 @@ class BitcadeApp:
             "card_min_width": self.normalize_layout_number(form, "card_min_width", self.stored_layout_int(layout, "card_min_width"), 120, 1200),
             "grid_gap": self.normalize_layout_number(form, "grid_gap", self.stored_layout_int(layout, "grid_gap"), 0, 120),
             "hero_scale": self.normalize_layout_number(form, "hero_scale", self.stored_layout_int(layout, "hero_scale"), 50, 160),
+            "hero_text_width": self.normalize_layout_number(form, "hero_text_width", self.stored_layout_int(layout, "hero_text_width"), 320, 10000),
             "thumbnail_ratio": first_form_value(form, "thumbnail_ratio", str(layout.get("thumbnail_ratio", DEFAULT_PLAY_LAYOUT["thumbnail_ratio"]))).strip(),
         }
         if normalized["thumbnail_ratio"] not in THUMBNAIL_RATIOS:
             raise ValueError("Unknown thumbnail ratio.")
         if normalized["content_width"] > normalized["screen_width"]:
             normalized["content_width"] = normalized["screen_width"]
+        if normalized["hero_text_width"] > normalized["content_width"]:
+            normalized["hero_text_width"] = normalized["content_width"]
         return normalized
 
     def update_branding_settings(self, form: dict[str, list[str]], files: dict[str, dict[str, Any]]) -> None:
@@ -3274,6 +3420,9 @@ class BitcadeApp:
             </div>
             <div class="field-row">
               <label>Hero scale (%) <input id="hero-scale" type="number" name="hero_scale" min="50" max="160" value="{html.escape(str(play_layout.get('hero_scale', DEFAULT_PLAY_LAYOUT['hero_scale'])))}" required></label>
+              <label>Hero text width <input id="hero-text-width" type="number" name="hero_text_width" min="320" max="10000" value="{html.escape(str(play_layout.get('hero_text_width', DEFAULT_PLAY_LAYOUT['hero_text_width'])))}" required></label>
+            </div>
+            <div class="field-row">
               <label>Thumbnail shape <select name="thumbnail_ratio">{ratio_options}</select></label>
             </div>
             <div class="form-actions">
@@ -3301,7 +3450,7 @@ class BitcadeApp:
         <script>
         (() => {{
           const byId = (id) => document.getElementById(id);
-          const fields = ["screen-width", "screen-height", "safe-margin", "content-width", "card-min-width", "grid-gap", "hero-scale"].map(byId);
+          const fields = ["screen-width", "screen-height", "safe-margin", "content-width", "card-min-width", "grid-gap", "hero-scale", "hero-text-width"].map(byId);
           const summary = byId("layout-summary");
           const estimate = byId("layout-estimate");
           const numberValue = (field, fallback = 0) => Number.parseInt(field?.value || fallback, 10) || fallback;
@@ -3323,6 +3472,7 @@ class BitcadeApp:
             byId("screen-width").value = width;
             byId("screen-height").value = height;
             byId("content-width").value = Math.max(320, width - numberValue(byId("safe-margin"), {DEFAULT_PLAY_LAYOUT['safe_margin']}) * 2);
+            byId("hero-text-width").value = byId("content-width").value;
             updateEstimate();
           }});
           byId("fit-play-screen")?.addEventListener("click", () => {{
@@ -3334,6 +3484,7 @@ class BitcadeApp:
             byId("card-min-width").value = landscape ? Math.max(220, Math.min(420, Math.round(width / 5))) : Math.max(180, Math.min(360, Math.round(width / 2.4)));
             byId("grid-gap").value = landscape ? 20 : 14;
             byId("hero-scale").value = landscape ? 100 : 82;
+            byId("hero-text-width").value = byId("content-width").value;
             updateEstimate();
           }});
           updateEstimate();

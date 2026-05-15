@@ -7,7 +7,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from bitcade.app import BitcadeApp, REPLIT_REACT_VITE_WEB_PLATFORM
+from bitcade.app import BitcadeApp, REPLIT_REACT_VITE_WEB_PLATFORM, key_event_init
 
 
 class ReplitReactViteWebTests(unittest.TestCase):
@@ -24,6 +24,40 @@ class ReplitReactViteWebTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_key_event_init_includes_legacy_key_code_fields(self) -> None:
+        self.assertEqual(
+            key_event_init("ArrowLeft"),
+            {"key": "ArrowLeft", "code": "ArrowLeft", "keyCode": 37, "which": 37},
+        )
+        self.assertEqual(
+            key_event_init("Space"),
+            {"key": " ", "code": "Space", "keyCode": 32, "which": 32},
+        )
+        self.assertEqual(
+            key_event_init("W"),
+            {"key": "w", "code": "KeyW", "keyCode": 87, "which": 87},
+        )
+
+    def test_input_settings_overview_links_to_subscreens(self) -> None:
+        rendered = self.app.render_input_settings().decode("utf-8")
+
+        self.assertIn('href="/admin/input/display"', rendered)
+        self.assertIn('href="/admin/input/gamepad"', rendered)
+        self.assertIn("Gamepad mapping", rendered)
+
+    def test_gamepad_input_settings_has_capture_stream(self) -> None:
+        rendered = self.app.render_gamepad_input_settings().decode("utf-8")
+
+        self.assertIn("data-capture-binding", rendered)
+        self.assertIn('id="input-stream"', rendered)
+        self.assertIn("Capturing next input", rendered)
+
+    def test_display_input_settings_has_detect_display(self) -> None:
+        rendered = self.app.render_display_input_settings().decode("utf-8")
+
+        self.assertIn('id="detect-display"', rendered)
+        self.assertIn('action="/admin/install-profile"', rendered)
 
     def make_workspace(self, *, include_api: bool = False, artifact_kind: str = "web") -> Path:
         workspace = self.root / "Goal-Defender"
@@ -238,6 +272,7 @@ class ReplitReactViteWebTests(unittest.TestCase):
         self.assertIn("layout-compact", rendered)
         self.assertIn("play-page", rendered)
         self.assertIn("--play-max-width: 1536px", rendered)
+        self.assertIn("--play-hero-text-width: 1536px", rendered)
 
     def test_branding_layout_tools_update_play_screen_variables(self) -> None:
         form = {
@@ -262,6 +297,7 @@ class ReplitReactViteWebTests(unittest.TestCase):
             "card_min_width": ["360"],
             "grid_gap": ["24"],
             "hero_scale": ["90"],
+            "hero_text_width": ["1800"],
             "thumbnail_ratio": ["4 / 3"],
         }
 
@@ -272,6 +308,7 @@ class ReplitReactViteWebTests(unittest.TestCase):
         self.assertIn("--play-max-width: 2200px", rendered)
         self.assertIn("--play-card-min: 360px", rendered)
         self.assertIn("--play-hero-scale: 0.90", rendered)
+        self.assertIn("--play-hero-text-width: 1800px", rendered)
         self.assertIn("--play-thumbnail-ratio: 4 / 3", rendered)
 
     def test_branding_logo_upload_is_served_when_selected(self) -> None:
