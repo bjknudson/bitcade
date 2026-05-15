@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from bitcade.app import BitcadeApp, REPLIT_REACT_VITE_WEB_PLATFORM
@@ -121,6 +122,24 @@ class ReplitReactViteWebTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "no index.html"):
             self.app.verify_replit_static_output(workspace, artifact, require_existing=True)
+
+    def test_zip_extraction_skips_ignored_directories(self) -> None:
+        zip_path = self.root / "Goal-Defender.zip"
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr("Goal-Defender/pnpm-workspace.yaml", "packages:\n  - artifacts/*\n")
+            archive.writestr("Goal-Defender/pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
+            archive.writestr("Goal-Defender/node_modules/large-package/file.js", "ignored")
+            archive.writestr("Goal-Defender/.git/config", "ignored")
+            archive.writestr("Goal-Defender/artifacts/rocket-league-2d/package.json", json.dumps({"name": "@workspace/rocket-league-2d"}))
+            archive.writestr("Goal-Defender/artifacts/rocket-league-2d/index.html", "<div id=\"root\"></div>")
+            archive.writestr("Goal-Defender/artifacts/rocket-league-2d/vite.config.ts", "export default {}")
+            archive.writestr("Goal-Defender/artifacts/rocket-league-2d/src/main.tsx", "console.log('game')")
+
+        extracted = self.app.extract_and_validate_zip(zip_path, self.root / "extract", "goal-defender")
+
+        self.assertFalse((extracted / "node_modules").exists())
+        self.assertFalse((extracted / ".git").exists())
+        self.assertTrue((extracted / "artifacts" / "rocket-league-2d" / "index.html").is_file())
 
 
 if __name__ == "__main__":

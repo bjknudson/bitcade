@@ -734,6 +734,7 @@ class BitcadeApp:
         self.default_admin_password = os.environ.get("BITCADE_DEFAULT_ADMIN_PASSWORD", DEFAULT_ADMIN_PASSWORD)
         self.python_game_bin = os.environ.get("BITCADE_PYTHON_GAME_BIN", "/usr/bin/python3")
         self.game_display = os.environ.get("BITCADE_GAME_DISPLAY", ":0")
+        self.import_command_timeout = int(os.environ.get("BITCADE_IMPORT_COMMAND_TIMEOUT", "600"))
         if config:
             self.data_dir = Path(config.get("BITCADE_DATA_DIR", self.data_dir)).expanduser().resolve()
             self.database = Path(config.get("BITCADE_DATABASE", self.database)).expanduser().resolve()
@@ -744,6 +745,7 @@ class BitcadeApp:
             self.default_admin_password = str(config.get("BITCADE_DEFAULT_ADMIN_PASSWORD", self.default_admin_password))
             self.python_game_bin = str(config.get("BITCADE_PYTHON_GAME_BIN", self.python_game_bin))
             self.game_display = str(config.get("BITCADE_GAME_DISPLAY", self.game_display))
+            self.import_command_timeout = int(config.get("BITCADE_IMPORT_COMMAND_TIMEOUT", self.import_command_timeout))
         self.games_dir = self.data_dir / "games"
         self.uploads_dir = self.data_dir / "uploads"
         self.thumbnails_dir = self.data_dir / "thumbnails"
@@ -1434,7 +1436,7 @@ class BitcadeApp:
                     raise ValueError("Zip package cannot mix root-level files and top-level folders unless it is a p5.js editor export.")
                 if not has_root_files and len(top_levels) != 1:
                     raise ValueError("Zip package must contain exactly one top-level game folder.")
-                archive.extractall(temp_dir)
+                self.extract_zip_members(archive, temp_dir, package_members)
         except zipfile.BadZipFile as error:
             raise ValueError("Uploaded file is not a valid zip package.") from error
         if has_root_files:
@@ -1456,6 +1458,13 @@ class BitcadeApp:
                 raise ValueError("Package is missing bitcade.json and does not look like a supported importer format.")
             self.detect_package_format(game_dir)
         return game_dir
+
+    def extract_zip_members(self, archive: zipfile.ZipFile, destination_root: Path, members: list[str]) -> None:
+        for member in members:
+            target = destination_root / safe_package_path(member)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(member) as source, target.open("wb") as destination:
+                shutil.copyfileobj(source, destination)
 
     def detect_package_format(self, game_dir: Path) -> dict[str, str]:
         metadata: dict[str, Any] = {}
@@ -1672,7 +1681,19 @@ class BitcadeApp:
         with log_path.open("wb") as log_file:
             log_file.write(("$ " + " ".join(args) + "\n").encode("utf-8"))
             try:
-                result = subprocess.run(args, cwd=cwd, env=env, stdout=log_file, stderr=subprocess.STDOUT, check=False)
+                result = subprocess.run(
+                    args,
+                    cwd=cwd,
+                    env=env,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                    timeout=self.import_command_timeout,
+                )
+            except subprocess.TimeoutExpired as error:
+                log_file.write(f"\nCommand timed out after {self.import_command_timeout} seconds.\n".encode("utf-8"))
+                action = "Install" if "install" in args else "Build"
+                raise ValueError(f"{action} timed out. See {log_path}.") from error
             except OSError as error:
                 log_file.write(f"\n{error}\n".encode("utf-8"))
                 raise ValueError(f"{args[0]} failed to start. See {log_path}.") from error
