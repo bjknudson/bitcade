@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from bitcade.app import BitcadeApp, REPLIT_REACT_VITE_WEB_PLATFORM
+
+
+class ReplitReactViteWebTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.app = BitcadeApp(
+            {
+                "BITCADE_DATA_DIR": str(self.root / "data"),
+                "BITCADE_DATABASE": str(self.root / "data" / "bitcade.db"),
+                "BITCADE_SEED_SAMPLES": False,
+            }
+        )
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def make_workspace(self, *, include_api: bool = False, artifact_kind: str = "web") -> Path:
+        workspace = self.root / "Goal-Defender"
+        workspace.mkdir()
+        (workspace / "pnpm-workspace.yaml").write_text("packages:\n  - artifacts/*\n", encoding="utf-8")
+        (workspace / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
+        self.make_artifact(workspace, "rocket-league-2d", "@workspace/rocket-league-2d", artifact_kind)
+        if include_api:
+            self.make_artifact(workspace, "api-server", "@workspace/api-server", "server")
+        return workspace
+
+    def make_artifact(self, workspace: Path, name: str, package_name: str, kind: str) -> Path:
+        artifact = workspace / "artifacts" / name
+        (artifact / "src").mkdir(parents=True)
+        (artifact / ".replit-artifact").mkdir()
+        (artifact / "index.html").write_text("<div id=\"root\"></div>", encoding="utf-8")
+        (artifact / "vite.config.ts").write_text("export default {}", encoding="utf-8")
+        (artifact / "src" / "main.tsx").write_text("console.log('game')", encoding="utf-8")
+        (artifact / "package.json").write_text(
+            json.dumps({"name": package_name, "scripts": {"build": "vite build"}}),
+            encoding="utf-8",
+        )
+        (artifact / ".replit-artifact" / "artifact.toml").write_text(
+            "\n".join(
+                [
+                    f'kind = "{kind}"',
+                    'title = "2D Pixel Rocket League"',
+                    "localPort = 22004",
+                    "[development]",
+                    'run = "pnpm run dev"',
+                    "[production]",
+                    'build = "pnpm run build"',
+                    'publicDir = "dist/public"',
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return artifact
+
+    def test_detect_artifact(self) -> None:
+        workspace = self.make_workspace()
+
+        detected = self.app.detect_package_format(workspace)
+        artifact = self.app.select_replit_artifact(workspace)
+        metadata = self.app.create_replit_vite_manifest(
+            original_name="Goal-Defender.zip",
+            artifact=artifact,
+            port=4107,
+            entry="artifacts/rocket-league-2d/dist/public/index.html",
+            public_dir="artifacts/rocket-league-2d/dist/public",
+            install_command="pnpm install --frozen-lockfile",
+            build_command="PORT=${PORT} BASE_PATH=/ pnpm --filter @workspace/rocket-league-2d run build",
+        )
+
+        self.assertEqual(detected["platform"], REPLIT_REACT_VITE_WEB_PLATFORM)
+        self.assertEqual(artifact["root"], "artifacts/rocket-league-2d")
+        self.assertEqual(metadata["runtime"]["type"], "static-web")
+
+    def test_read_package_name_for_filter_build_command(self) -> None:
+        workspace = self.make_workspace()
+        artifact = self.app.select_replit_artifact(workspace)
+
+        metadata = self.app.create_replit_vite_manifest(
+            original_name="Goal-Defender.zip",
+            artifact=artifact,
+            port=4107,
+            entry="artifacts/rocket-league-2d/dist/public/index.html",
+            public_dir="artifacts/rocket-league-2d/dist/public",
+            install_command="pnpm install --frozen-lockfile",
+            build_command=f"PORT=${{PORT}} BASE_PATH=/ pnpm --filter {artifact['packageName']} run build",
+        )
+
+        self.assertEqual(artifact["packageName"], "@workspace/rocket-league-2d")
+        self.assertIn("pnpm --filter @workspace/rocket-league-2d run build", metadata["runtime"]["buildCommand"])
+
+    def test_prefer_web_artifact(self) -> None:
+        workspace = self.make_workspace(include_api=True)
+
+        artifact = self.app.select_replit_artifact(workspace)
+
+        self.assertEqual(artifact["root"], "artifacts/rocket-league-2d")
+
+    def test_verify_dist_public_output(self) -> None:
+        workspace = self.make_workspace()
+        artifact = self.app.select_replit_artifact(workspace)
+        output = workspace / "artifacts" / "rocket-league-2d" / "dist" / "public"
+        output.mkdir(parents=True)
+        (output / "index.html").write_text("<!doctype html>", encoding="utf-8")
+
+        entry = self.app.verify_replit_static_output(workspace, artifact, require_existing=True)
+
+        self.assertEqual(entry, "artifacts/rocket-league-2d/dist/public/index.html")
+
+    def test_missing_output_fails(self) -> None:
+        workspace = self.make_workspace()
+        artifact = self.app.select_replit_artifact(workspace)
+
+        with self.assertRaisesRegex(ValueError, "no index.html"):
+            self.app.verify_replit_static_output(workspace, artifact, require_existing=True)
+
+
+if __name__ == "__main__":
+    unittest.main()

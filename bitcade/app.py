@@ -7,6 +7,7 @@ import mimetypes
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -25,7 +26,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SAMPLE_GAMES_DIR = REPO_ROOT / "samples" / "games"
 STATIC_DIR = REPO_ROOT / "bitcade" / "static"
 PYTHON_GAME_PLATFORM = "python-pygame"
-BROWSER_PLATFORMS = {"html", "p5js", "scratch", "twine", "bitsy", "makecode-arcade"}
+REPLIT_REACT_VITE_WEB_PLATFORM = "replit-react-vite-web"
+BROWSER_PLATFORMS = {"html", "p5js", "scratch", "twine", "bitsy", "makecode-arcade", REPLIT_REACT_VITE_WEB_PLATFORM}
 SUPPORTED_PLATFORMS = BROWSER_PLATFORMS | {PYTHON_GAME_PLATFORM}
 FORMAT_GUIDES = {
     "p5js": {
@@ -46,6 +48,11 @@ ALLOWED_PACKAGE_EXTENSIONS = {
     ".css",
     ".js",
     ".json",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".yaml",
+    ".yml",
     ".png",
     ".jpg",
     ".jpeg",
@@ -63,8 +70,10 @@ ALLOWED_PACKAGE_EXTENSIONS = {
     ".ttf",
     ".otf",
 }
+ALLOWED_PACKAGE_FILENAMES = {".replit", "pnpm-lock.yaml", "pnpm-workspace.yaml", "package.json"}
 BLOCKED_PACKAGE_EXTENSIONS = {".exe", ".dmg", ".pkg", ".sh", ".command", ".bat", ".app", ".jar"}
 IGNORED_PACKAGE_NAMES = {".ds_store", "thumbs.db"}
+EXCLUDED_IMPORT_DIR_NAMES = {".git", ".agents", ".local", "node_modules"}
 THUMBNAIL_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 MAX_THUMBNAIL_BYTES = 5 * 1024 * 1024
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -265,7 +274,7 @@ def validate_metadata(metadata: dict[str, Any], game_dir: Path) -> None:
 def validate_package_files_for_platform(game_dir: Path, metadata: dict[str, Any]) -> None:
     platform = str(metadata["platform"])
     python_files = sorted(path.relative_to(game_dir).as_posix() for path in game_dir.rglob("*.py") if path.is_file())
-    if platform != PYTHON_GAME_PLATFORM and python_files:
+    if platform not in {PYTHON_GAME_PLATFORM, REPLIT_REACT_VITE_WEB_PLATFORM} and python_files:
         raise ValueError(f"Python files are only allowed in {PYTHON_GAME_PLATFORM} packages: {', '.join(python_files)}")
     if platform == PYTHON_GAME_PLATFORM:
         blocked_dependency_files = [
@@ -1359,7 +1368,11 @@ class BitcadeApp:
             temp_dir = Path(temp_name)
             extracted_dir = self.extract_and_validate_zip(upload_path, temp_dir, upload_stem, allow_generated_metadata=student_form is not None)
             detected = self.detect_package_format(extracted_dir)
-            if student_form is not None:
+            if detected["platform"] == REPLIT_REACT_VITE_WEB_PLATFORM:
+                if student_form is not None:
+                    raise ValueError("Replit React/Vite workspace imports must be reviewed by an admin upload.")
+                metadata = self.install_replit_react_vite_web_import(extracted_dir, filename)
+            elif student_form is not None:
                 metadata = self.build_student_metadata(student_form, detected)
                 if detected["platform"] == "p5js":
                     self.normalize_p5js_import(extracted_dir)
@@ -1373,6 +1386,7 @@ class BitcadeApp:
                 (extracted_dir / "bitcade.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
                 validate_metadata(metadata, extracted_dir)
             validate_package_files_for_platform(extracted_dir, metadata)
+            self.prune_import_excluded_dirs(extracted_dir)
             game_id = self.available_game_id(slugify(str(metadata["title"])))
             install_dir = self.games_dir / game_id
             shutil.move(str(extracted_dir), install_dir)
@@ -1394,12 +1408,18 @@ class BitcadeApp:
                     if info.is_dir():
                         continue
                     parts = PurePosixPath(package_path).parts
-                    if not parts or parts[0] == "__MACOSX" or parts[-1].lower() in IGNORED_PACKAGE_NAMES:
+                    lower_parts = {part.lower() for part in parts}
+                    if (
+                        not parts
+                        or parts[0] == "__MACOSX"
+                        or parts[-1].lower() in IGNORED_PACKAGE_NAMES
+                        or lower_parts & EXCLUDED_IMPORT_DIR_NAMES
+                    ):
                         continue
                     extension = Path(parts[-1]).suffix.lower()
                     if extension in BLOCKED_PACKAGE_EXTENSIONS:
                         raise ValueError(f"Blocked file type in package: {package_path}")
-                    if extension not in ALLOWED_PACKAGE_EXTENSIONS:
+                    if extension not in ALLOWED_PACKAGE_EXTENSIONS and parts[-1].lower() not in ALLOWED_PACKAGE_FILENAMES:
                         raise ValueError(f"Unsupported file type in package: {package_path}")
                     package_members.append(package_path)
                     if len(parts) == 1:
@@ -1409,7 +1429,8 @@ class BitcadeApp:
                 if not package_members:
                     raise ValueError("Uploaded zip is empty.")
                 root_filenames = {PurePosixPath(path).name.lower() for path in package_members if len(PurePosixPath(path).parts) == 1}
-                if has_root_files and top_levels and "index.html" not in root_filenames:
+                is_replit_root_export = {"pnpm-workspace.yaml", "pnpm-lock.yaml"} <= root_filenames and "artifacts" in top_levels
+                if has_root_files and top_levels and "index.html" not in root_filenames and not is_replit_root_export:
                     raise ValueError("Zip package cannot mix root-level files and top-level folders unless it is a p5.js editor export.")
                 if not has_root_files and len(top_levels) != 1:
                     raise ValueError("Zip package must contain exactly one top-level game folder.")
@@ -1429,9 +1450,10 @@ class BitcadeApp:
             game_dir = temp_dir / next(iter(top_levels))
         if not game_dir.is_dir():
             raise ValueError("Zip package did not extract to a game folder.")
-        if not (game_dir / "bitcade.json").is_file() and not self.looks_like_p5js_export(game_dir):
+        self.prune_import_excluded_dirs(game_dir)
+        if not (game_dir / "bitcade.json").is_file() and not self.looks_like_p5js_export(game_dir) and not self.looks_like_replit_react_vite_web(game_dir):
             if not allow_generated_metadata:
-                raise ValueError("Package is missing bitcade.json and does not look like a p5.js editor export.")
+                raise ValueError("Package is missing bitcade.json and does not look like a supported importer format.")
             self.detect_package_format(game_dir)
         return game_dir
 
@@ -1462,6 +1484,8 @@ class BitcadeApp:
             platform = PYTHON_GAME_PLATFORM
         elif metadata_platform in SUPPORTED_PLATFORMS and metadata_platform != PYTHON_GAME_PLATFORM:
             platform = metadata_platform
+        elif self.looks_like_replit_react_vite_web(game_dir):
+            platform = REPLIT_REACT_VITE_WEB_PLATFORM
         elif self.looks_like_p5js_export(game_dir):
             platform = "p5js"
         elif python_files and not (game_dir / "index.html").is_file():
@@ -1478,12 +1502,303 @@ class BitcadeApp:
                 if not python_files:
                     raise ValueError("Python/Pygame package is missing a .py entry file.")
                 entry = "main.py" if (game_dir / "main.py").is_file() else python_files[0]
+            elif platform == REPLIT_REACT_VITE_WEB_PLATFORM:
+                candidate = self.select_replit_artifact(game_dir)
+                entry = self.verify_replit_static_output(game_dir, candidate, require_existing=False)
             else:
                 if not (game_dir / "index.html").is_file():
                     raise ValueError("Browser package is missing index.html.")
                 entry = "index.html"
 
         return {"platform": platform, "entry": entry}
+
+    def looks_like_replit_react_vite_web(self, workspace_root: Path) -> bool:
+        if not (workspace_root / "pnpm-workspace.yaml").is_file() or not (workspace_root / "pnpm-lock.yaml").is_file():
+            return False
+        return bool(self.find_replit_artifacts(workspace_root))
+
+    def find_replit_artifacts(self, workspace_root: Path) -> list[dict[str, Any]]:
+        artifacts_dir = workspace_root / "artifacts"
+        if not artifacts_dir.is_dir():
+            return []
+        candidates: list[dict[str, Any]] = []
+        for artifact_root in sorted(path for path in artifacts_dir.iterdir() if path.is_dir()):
+            has_package = (artifact_root / "package.json").is_file()
+            has_vite = (artifact_root / "vite.config.ts").is_file() or (artifact_root / "vite.config.js").is_file()
+            has_index = (artifact_root / "index.html").is_file()
+            has_src = (artifact_root / "src").is_dir()
+            if not (has_package and has_index and has_src):
+                continue
+            metadata = self.read_artifact_toml(artifact_root)
+            package = self.read_artifact_package_json(artifact_root)
+            relative_root = artifact_root.relative_to(workspace_root).as_posix()
+            package_name = str(package.get("name") or "").strip()
+            support_name = any(token in artifact_root.name.lower() or token in package_name.lower() for token in ("api-server", "mockup-sandbox", "sandbox", "server"))
+            score = 0
+            if metadata.get("kind") == "web":
+                score += 8
+            if has_vite:
+                score += 4
+            if has_index and has_package:
+                score += 3
+            if package_name and not support_name:
+                score += 2
+            if support_name:
+                score -= 4
+            candidates.append(
+                {
+                    "root": relative_root,
+                    "path": artifact_root,
+                    "metadataFile": f"{relative_root}/.replit-artifact/artifact.toml"
+                    if (artifact_root / ".replit-artifact" / "artifact.toml").is_file()
+                    else "",
+                    "metadata": metadata,
+                    "package": package,
+                    "packageName": package_name,
+                    "hasViteConfig": has_vite,
+                    "score": score,
+                }
+            )
+        return candidates
+
+    def select_replit_artifact(self, workspace_root: Path) -> dict[str, Any]:
+        candidates = self.find_replit_artifacts(workspace_root)
+        if not candidates:
+            raise ValueError("Could not find a Vite web artifact inside this Replit bundle.")
+        ranked = sorted(candidates, key=lambda candidate: candidate["score"], reverse=True)
+        best = ranked[0]
+        ties = [candidate for candidate in ranked if candidate["score"] == best["score"]]
+        if len(ties) > 1:
+            names = ", ".join(candidate["root"] for candidate in ties)
+            raise ValueError(f"Found multiple playable artifacts. Choose one in the admin installer: {names}")
+        return best
+
+    def read_artifact_toml(self, artifact_root: Path) -> dict[str, Any]:
+        path = artifact_root / ".replit-artifact" / "artifact.toml"
+        if not path.is_file():
+            return {}
+        try:
+            import tomllib
+
+            return tomllib.loads(path.read_text(encoding="utf-8"))
+        except (ImportError, ValueError):
+            return self.read_simple_toml(path)
+
+    def read_simple_toml(self, path: Path) -> dict[str, Any]:
+        data: dict[str, Any] = {}
+        section: list[str] = []
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith("[") and stripped.endswith("]"):
+                section = [part.strip() for part in stripped.strip("[]").split(".") if part.strip()]
+                cursor = data
+                for part in section:
+                    cursor = cursor.setdefault(part, {})
+                continue
+            if "=" not in stripped:
+                continue
+            key, raw_value = stripped.split("=", 1)
+            key = key.strip()
+            value = raw_value.strip().strip('"').strip("'")
+            cursor = data
+            for part in section:
+                cursor = cursor.setdefault(part, {})
+            cursor[key] = int(value) if value.isdigit() else value
+        return data
+
+    def read_artifact_package_json(self, artifact_root: Path) -> dict[str, Any]:
+        try:
+            package = json.loads((artifact_root / "package.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return package if isinstance(package, dict) else {}
+
+    def install_replit_react_vite_web_import(self, workspace_root: Path, original_name: str) -> dict[str, Any]:
+        artifact = self.select_replit_artifact(workspace_root)
+        package_name = str(artifact.get("packageName") or "").strip()
+        if not package_name:
+            package = artifact["package"] if isinstance(artifact.get("package"), dict) else {}
+            scripts = package.get("scripts", {}) if isinstance(package.get("scripts"), dict) else {}
+            if "build" not in scripts:
+                raise ValueError("No package name found and artifact package.json has no build script.")
+
+        if shutil.which("pnpm") is None:
+            raise ValueError("pnpm is required but was not found.")
+
+        port = self.assign_static_web_port()
+        log_dir = self.logs_dir / f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{slugify(Path(original_name).stem)}"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        install_log = log_dir / "install.log"
+        build_log = log_dir / "build.log"
+        install_command = "pnpm install --frozen-lockfile"
+        build_args = ["pnpm", "--filter", package_name, "run", "build"] if package_name else ["pnpm", "run", "build"]
+        build_command = (
+            f"PORT=${{PORT}} BASE_PATH=/ pnpm --filter {package_name} run build"
+            if package_name
+            else "PORT=${PORT} BASE_PATH=/ pnpm run build"
+        )
+
+        self.run_logged_command(["pnpm", "install", "--frozen-lockfile"], workspace_root, install_log)
+        build_cwd = workspace_root if package_name else artifact["path"]
+        self.run_logged_command(build_args, build_cwd, build_log, env_updates={"PORT": str(port), "BASE_PATH": "/"})
+        shutil.copy2(install_log, workspace_root / "install.log")
+        shutil.copy2(build_log, workspace_root / "build.log")
+        entry = self.verify_replit_static_output(workspace_root, artifact, require_existing=True)
+        public_dir = str(PurePosixPath(entry).parent)
+        metadata = self.create_replit_vite_manifest(
+            original_name=original_name,
+            artifact=artifact,
+            port=port,
+            entry=entry,
+            public_dir=public_dir,
+            install_command=install_command,
+            build_command=build_command,
+        )
+        (workspace_root / "bitcade.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+        return metadata
+
+    def run_logged_command(
+        self,
+        args: list[str],
+        cwd: Path,
+        log_path: Path,
+        env_updates: dict[str, str] | None = None,
+    ) -> None:
+        env = os.environ.copy()
+        if env_updates:
+            env.update(env_updates)
+        with log_path.open("wb") as log_file:
+            log_file.write(("$ " + " ".join(args) + "\n").encode("utf-8"))
+            try:
+                result = subprocess.run(args, cwd=cwd, env=env, stdout=log_file, stderr=subprocess.STDOUT, check=False)
+            except OSError as error:
+                log_file.write(f"\n{error}\n".encode("utf-8"))
+                raise ValueError(f"{args[0]} failed to start. See {log_path}.") from error
+        if result.returncode != 0:
+            action = "Install" if "install" in args else "Build"
+            raise ValueError(f"{action} failed. See {log_path}.")
+
+    def verify_replit_static_output(self, workspace_root: Path, artifact: dict[str, Any], *, require_existing: bool) -> str:
+        artifact_root = workspace_root / safe_package_path(str(artifact["root"]))
+        metadata = artifact.get("metadata") if isinstance(artifact.get("metadata"), dict) else {}
+        production = metadata.get("production", {}) if isinstance(metadata.get("production"), dict) else {}
+        configured_public_dir = str(production.get("publicDir") or "").strip()
+        candidates = []
+        if configured_public_dir:
+            candidates.append(artifact_root / safe_package_path(configured_public_dir))
+        candidates.extend([artifact_root / "dist" / "public", artifact_root / "dist"])
+        for public_dir in candidates:
+            index_path = public_dir / "index.html"
+            if index_path.is_file():
+                return index_path.relative_to(workspace_root).as_posix()
+        fallback = candidates[0].relative_to(workspace_root).as_posix() + "/index.html"
+        if require_existing:
+            raise ValueError("Build completed, but no index.html was found in the output folder.")
+        return fallback
+
+    def create_replit_vite_manifest(
+        self,
+        *,
+        original_name: str,
+        artifact: dict[str, Any],
+        port: int,
+        entry: str,
+        public_dir: str,
+        install_command: str,
+        build_command: str,
+    ) -> dict[str, Any]:
+        artifact_metadata = artifact.get("metadata") if isinstance(artifact.get("metadata"), dict) else {}
+        title = str(artifact_metadata.get("title") or artifact["path"].name.replace("-", " ").title())
+        package_name = str(artifact.get("packageName") or "")
+        diagnostics = {
+            "detectedAdapter": REPLIT_REACT_VITE_WEB_PLATFORM,
+            "workspaceRoot": ".",
+            "artifactRoot": artifact["root"],
+            "packageManager": "pnpm",
+            "workspacePackage": package_name,
+            "installCommand": install_command,
+            "buildCommand": build_command.replace("${PORT}", str(port)),
+            "publicDirectory": public_dir,
+            "runtime": "static-web",
+            "warnings": [],
+        }
+        if not artifact.get("metadataFile"):
+            diagnostics["warnings"].append("No artifact.toml found")
+        if not artifact.get("hasViteConfig"):
+            diagnostics["warnings"].append("No Vite config found")
+        if not package_name:
+            diagnostics["warnings"].append("No package name found")
+        return {
+            "schema": "bitcade.game.v1",
+            "title": title,
+            "authors": ["FILL IN: Student Name"],
+            "platform": REPLIT_REACT_VITE_WEB_PLATFORM,
+            "adapter": REPLIT_REACT_VITE_WEB_PLATFORM,
+            "entry": entry,
+            "description": "Imported Replit React/Vite web game. Review metadata before approval.",
+            "license": "Classroom use only",
+            "credits": ["Imported from Replit React/Vite web artifact"],
+            "source": {"type": "replit-zip", "originalName": original_name},
+            "artifact": {
+                "root": artifact["root"],
+                "kind": str(artifact_metadata.get("kind") or "web"),
+                "packageManager": "pnpm",
+                "workspacePackage": package_name,
+                "metadataFile": artifact.get("metadataFile") or "",
+                "metadata": artifact_metadata,
+            },
+            "runtime": {
+                "type": "static-web",
+                "buildRequired": True,
+                "installCommand": install_command,
+                "buildCommand": build_command,
+                "publicDir": public_dir,
+                "serveMode": "static",
+                "port": port,
+                "url": f"http://127.0.0.1:{port}/",
+            },
+            "display": {
+                "mode": "fullscreen-browser",
+                "browser": "chromium",
+                "hideCursor": True,
+                "width": DEFAULT_DISPLAY_WIDTH,
+                "height": DEFAULT_DISPLAY_HEIGHT,
+                "scaling": "fit",
+                "speedModel": "delta-time",
+            },
+            "players": {"min": 2, "max": 2, "simultaneous": True},
+            "input": {
+                "requiresKeyboard": True,
+                "requiresMouse": False,
+                "supportsGamepad": False,
+                "allowsSharedKeyboard": True,
+            },
+            "controls": {
+                "player1": {"up": "ArrowUp", "down": "ArrowDown", "left": "ArrowLeft", "right": "ArrowRight", "a": "Space", "b": "Shift", "start": "Enter"},
+                "player2": {"up": "W", "down": "S", "left": "A", "right": "D", "a": "F", "b": "G", "start": "R"},
+                "system": {"exit": "Escape", "menu": "Escape"},
+                "editable": True,
+            },
+            "safety": {"approved": False, "network": "local-only"},
+            "importDiagnostics": diagnostics,
+        }
+
+    def assign_static_web_port(self) -> int:
+        for port in range(4107, 4199):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                try:
+                    sock.bind(("127.0.0.1", port))
+                except OSError:
+                    continue
+                return port
+        raise ValueError("No local static web runtime port is available.")
+
+    def prune_import_excluded_dirs(self, game_dir: Path) -> None:
+        for path in sorted(game_dir.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+            if path.is_dir() and path.name.lower() in EXCLUDED_IMPORT_DIR_NAMES:
+                shutil.rmtree(path)
 
     def build_student_metadata(self, form: dict[str, str], detected: dict[str, str]) -> dict[str, Any]:
         title = form.get("title", "").strip()
@@ -2486,6 +2801,8 @@ class BitcadeApp:
         if row is None:
             return html_page("Game not found", "<h1>Game not found</h1>")
         game = self.rows_to_games([row])[0]
+        metadata = read_metadata(self.games_dir / game_id)
+        diagnostics_panel = self.render_import_diagnostics(metadata)
         platform_options = "".join(
             f'<option value="{html.escape(platform)}"{" selected" if platform == game["platform"] else ""}>{html.escape(platform)}</option>'
             for platform in sorted(SUPPORTED_PLATFORMS)
@@ -2509,6 +2826,7 @@ class BitcadeApp:
           <h1>{html.escape(game['title'])}</h1>
           <p>Update display metadata before approving the game for the arcade menu.</p>
         </section>
+        {diagnostics_panel}
         <form class="panel edit-form" action="/admin/games/{html.escape(game['id'])}/edit" method="post" enctype="multipart/form-data">
           <div class="thumbnail-edit">
             {thumbnail_preview}
@@ -2547,6 +2865,37 @@ class BitcadeApp:
         </form>
         """
         return html_page("Edit Game", body)
+
+    def render_import_diagnostics(self, metadata: dict[str, Any]) -> str:
+        diagnostics = metadata.get("importDiagnostics")
+        if not isinstance(diagnostics, dict):
+            return ""
+        fields = [
+            ("Detected adapter", diagnostics.get("detectedAdapter")),
+            ("Workspace root", diagnostics.get("workspaceRoot")),
+            ("Artifact root", diagnostics.get("artifactRoot")),
+            ("Package manager", diagnostics.get("packageManager")),
+            ("Workspace package", diagnostics.get("workspacePackage")),
+            ("Install command", diagnostics.get("installCommand")),
+            ("Build command", diagnostics.get("buildCommand")),
+            ("Public directory", diagnostics.get("publicDirectory")),
+            ("Runtime", diagnostics.get("runtime")),
+        ]
+        rows = "".join(
+            f"<tr><th>{html.escape(label)}</th><td><code>{html.escape(str(value or ''))}</code></td></tr>"
+            for label, value in fields
+        )
+        warnings = diagnostics.get("warnings", [])
+        warning_html = ""
+        if isinstance(warnings, list) and warnings:
+            warning_html = "<ul>" + "".join(f"<li>{html.escape(str(warning))}</li>" for warning in warnings) + "</ul>"
+        return f"""
+        <section class="panel">
+          <h2>Import diagnostics</h2>
+          <table class="admin-table diagnostics-table"><tbody>{rows}</tbody></table>
+          {warning_html}
+        </section>
+        """
 
     def serve_game_file(self, start_response, rest: str):
         parts = rest.split("/", 1)
