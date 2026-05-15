@@ -168,6 +168,29 @@ class ReplitReactViteWebTests(unittest.TestCase):
         self.assertEqual(files["package"]["file"].read(), b"PK\x03\x04zip-bytes")
         files["package"]["file"].close()
 
+    def test_upload_multipart_parser_handles_large_binary_line(self) -> None:
+        boundary = "bitcade-test-boundary"
+        payload = b"PK\x03\x04" + (b"x" * 140000)
+        body = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="package"; filename="Goal-Defender.zip"\r\n'
+            "Content-Type: application/zip\r\n\r\n"
+        ).encode("utf-8") + payload + (
+            f"\r\n--{boundary}--\r\n"
+        ).encode("utf-8")
+        environ = {
+            "REQUEST_METHOD": "POST",
+            "CONTENT_TYPE": f"multipart/form-data; boundary={boundary}",
+            "CONTENT_LENGTH": str(len(body)),
+            "wsgi.input": BytesIO(body),
+        }
+
+        fields, files = self.app.parse_upload_multipart(environ)
+
+        self.assertEqual(fields, {})
+        self.assertEqual(files["package"]["file"].read(), payload)
+        files["package"]["file"].close()
+
 
 if __name__ == "__main__":
     unittest.main()

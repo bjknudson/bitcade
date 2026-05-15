@@ -10,6 +10,7 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import zipfile
 from datetime import datetime, timezone
@@ -76,7 +77,7 @@ IGNORED_PACKAGE_NAMES = {".ds_store", "thumbs.db"}
 EXCLUDED_IMPORT_DIR_NAMES = {".git", ".agents", ".local", "node_modules"}
 THUMBNAIL_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 MAX_THUMBNAIL_BYTES = 5 * 1024 * 1024
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_UPLOAD_BYTES = 250 * 1024 * 1024
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "bitcade"
 PASSWORD_HASH_ITERATIONS = 210_000
@@ -1193,6 +1194,7 @@ class BitcadeApp:
                 return self.redirect_admin(start_response, "Game metadata updated.")
             return self.not_found(start_response)
         except ValueError as error:
+            print(f"Bitcade handled request error on {path}: {error}", file=sys.stderr, flush=True)
             if path == "/admin/login":
                 return self.redirect(start_response, f"/admin/login?message={quote(str(error))}&level=error")
             if path == "/admin/change-password":
@@ -1293,11 +1295,63 @@ class BitcadeApp:
         boundary = ("--" + match.group(1)).encode("utf-8")
         final_boundary = boundary + b"--"
         stream = environ["wsgi.input"]
+        buffer = bytearray()
         fields: dict[str, str] = {}
         files: dict[str, dict[str, Any]] = {}
 
+        def read_line() -> bytes:
+            while True:
+                newline = buffer.find(b"\n")
+                if newline >= 0:
+                    line = bytes(buffer[: newline + 1])
+                    del buffer[: newline + 1]
+                    return line
+                chunk = stream.read(65536)
+                if not chunk:
+                    line = bytes(buffer)
+                    buffer.clear()
+                    return line
+                buffer.extend(chunk)
+
+        def read_part(destination: BinaryIO) -> str:
+            delimiter = b"\r\n" + boundary
+            keep = len(delimiter) + 4
+            while True:
+                index = buffer.find(delimiter)
+                if index >= 0:
+                    needed = index + len(delimiter) + 2
+                    while len(buffer) < needed:
+                        chunk = stream.read(65536)
+                        if not chunk:
+                            break
+                        buffer.extend(chunk)
+                    destination.write(bytes(buffer[:index]))
+                    del buffer[: index + len(delimiter)]
+                    if buffer.startswith(b"--"):
+                        del buffer[:2]
+                        if buffer.startswith(b"\r\n"):
+                            del buffer[:2]
+                        return "final"
+                    if buffer.startswith(b"\r\n"):
+                        del buffer[:2]
+                    return "next"
+
+                if len(buffer) > keep:
+                    write_size = len(buffer) - keep
+                    destination.write(bytes(buffer[:write_size]))
+                    del buffer[:write_size]
+
+                chunk = stream.read(65536)
+                if not chunk:
+                    if buffer:
+                        destination.write(bytes(buffer))
+                        buffer.clear()
+                    return "eof"
+
+                buffer.extend(chunk)
+
         while True:
-            line = stream.readline(65536)
+            line = read_line()
             if not line:
                 return fields, files
             stripped = line.rstrip(b"\r\n")
@@ -1309,7 +1363,7 @@ class BitcadeApp:
         while True:
             headers: list[str] = []
             while True:
-                line = stream.readline(65536)
+                line = read_line()
                 if not line:
                     return fields, files
                 if line in {b"\r\n", b"\n"}:
@@ -1319,7 +1373,7 @@ class BitcadeApp:
             disposition = next((line for line in headers if line.lower().startswith("content-disposition:")), "")
             name_match = re.search(r'name="([^"]+)"', disposition)
             if not name_match:
-                boundary_line = self.skip_multipart_part(stream, boundary, final_boundary)
+                boundary_line = read_part(BytesIO())
                 if boundary_line == "final":
                     return fields, files
                 continue
@@ -1328,37 +1382,17 @@ class BitcadeApp:
             filename_match = re.search(r'filename="([^"]*)"', disposition)
             if filename_match:
                 file_obj = tempfile.TemporaryFile("w+b")
-                boundary_line = self.read_multipart_part(stream, boundary, final_boundary, file_obj)
+                boundary_line = read_part(file_obj)
                 file_obj.seek(0)
                 files[name] = {"filename": filename_match.group(1), "file": file_obj}
             else:
-                buffer = BytesIO()
-                boundary_line = self.read_multipart_part(stream, boundary, final_boundary, buffer)
-                fields[name] = buffer.getvalue().decode("utf-8", errors="replace")
+                field_buffer = BytesIO()
+                boundary_line = read_part(field_buffer)
+                fields[name] = field_buffer.getvalue().decode("utf-8", errors="replace")
             if boundary_line == "final":
                 return fields, files
 
         return fields, files
-
-    def read_multipart_part(self, stream: BinaryIO, boundary: bytes, final_boundary: bytes, destination: BinaryIO) -> str:
-        previous: bytes | None = None
-        while True:
-            line = stream.readline(65536)
-            if not line:
-                if previous:
-                    destination.write(previous)
-                return "eof"
-            stripped = line.rstrip(b"\r\n")
-            if stripped in {boundary, final_boundary}:
-                if previous:
-                    destination.write(previous.removesuffix(b"\r\n").removesuffix(b"\n"))
-                return "final" if stripped == final_boundary else "next"
-            if previous:
-                destination.write(previous)
-            previous = line
-
-    def skip_multipart_part(self, stream: BinaryIO, boundary: bytes, final_boundary: bytes) -> str:
-        return self.read_multipart_part(stream, boundary, final_boundary, BytesIO())
 
     def read_optional_upload(self, upload: dict[str, Any] | None) -> dict[str, Any] | None:
         if upload is None or not upload.get("filename") or upload.get("file") is None:
