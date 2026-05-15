@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 import tempfile
 import unittest
 import zipfile
@@ -140,6 +141,32 @@ class ReplitReactViteWebTests(unittest.TestCase):
         self.assertFalse((extracted / "node_modules").exists())
         self.assertFalse((extracted / ".git").exists())
         self.assertTrue((extracted / "artifacts" / "rocket-league-2d" / "index.html").is_file())
+
+    def test_upload_multipart_parser_returns_package_stream(self) -> None:
+        boundary = "bitcade-test-boundary"
+        body = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="package"; filename="Goal-Defender.zip"\r\n'
+            "Content-Type: application/zip\r\n\r\n"
+        ).encode("utf-8") + b"PK\x03\x04zip-bytes" + (
+            f"\r\n--{boundary}\r\n"
+            'Content-Disposition: form-data; name="screen_code"\r\n\r\n'
+            "123456\r\n"
+            f"--{boundary}--\r\n"
+        ).encode("utf-8")
+        environ = {
+            "REQUEST_METHOD": "POST",
+            "CONTENT_TYPE": f"multipart/form-data; boundary={boundary}",
+            "CONTENT_LENGTH": str(len(body)),
+            "wsgi.input": BytesIO(body),
+        }
+
+        fields, files = self.app.parse_upload_multipart(environ)
+
+        self.assertEqual(fields["screen_code"], "123456")
+        self.assertEqual(files["package"]["filename"], "Goal-Defender.zip")
+        self.assertEqual(files["package"]["file"].read(), b"PK\x03\x04zip-bytes")
+        files["package"]["file"].close()
 
 
 if __name__ == "__main__":

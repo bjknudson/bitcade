@@ -1264,19 +1264,111 @@ class BitcadeApp:
             raise ValueError("Choose a zip package to upload.")
         if content_length > self.max_upload_bytes:
             raise ValueError(f"Upload exceeds the {self.max_upload_bytes // (1024 * 1024)} MB limit.")
-        fields, files = self.parse_multipart(environ, content_length)
+        fields, files = self.parse_upload_multipart(environ)
         student_form = None
         if require_code:
             self.require_screen_code(fields.get("screen_code", ""))
             student_form = fields
         upload = files.get("package")
-        if upload is None or not upload["filename"]:
+        if upload is None or not upload.get("filename"):
             raise ValueError("Choose a zip package to upload.")
         filename = Path(str(upload["filename"])).name
         if Path(filename).suffix.lower() != ".zip":
             raise ValueError("Uploaded package must be a .zip file.")
-        game_id = self.install_uploaded_package(BytesIO(upload["content"]), filename, files.get("thumbnail"), student_form=student_form)
+        package_file = upload.get("file")
+        if package_file is None:
+            raise ValueError("Uploaded package is empty.")
+        try:
+            package_file.seek(0)
+        except (AttributeError, OSError):
+            pass
+        game_id = self.install_uploaded_package(package_file, filename, self.read_optional_upload(files.get("thumbnail")), student_form=student_form)
         return game_id
+
+    def parse_upload_multipart(self, environ) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
+        content_type = environ.get("CONTENT_TYPE", "")
+        match = re.search(r'boundary="?([^";]+)"?', content_type)
+        if not content_type.lower().startswith("multipart/form-data") or not match:
+            raise ValueError("Upload form is missing a multipart boundary.")
+        boundary = ("--" + match.group(1)).encode("utf-8")
+        final_boundary = boundary + b"--"
+        stream = environ["wsgi.input"]
+        fields: dict[str, str] = {}
+        files: dict[str, dict[str, Any]] = {}
+
+        while True:
+            line = stream.readline(65536)
+            if not line:
+                return fields, files
+            stripped = line.rstrip(b"\r\n")
+            if stripped == boundary:
+                break
+            if stripped == final_boundary:
+                return fields, files
+
+        while True:
+            headers: list[str] = []
+            while True:
+                line = stream.readline(65536)
+                if not line:
+                    return fields, files
+                if line in {b"\r\n", b"\n"}:
+                    break
+                headers.append(line.decode("utf-8", errors="replace").strip())
+
+            disposition = next((line for line in headers if line.lower().startswith("content-disposition:")), "")
+            name_match = re.search(r'name="([^"]+)"', disposition)
+            if not name_match:
+                boundary_line = self.skip_multipart_part(stream, boundary, final_boundary)
+                if boundary_line == "final":
+                    return fields, files
+                continue
+
+            name = name_match.group(1)
+            filename_match = re.search(r'filename="([^"]*)"', disposition)
+            if filename_match:
+                file_obj = tempfile.TemporaryFile("w+b")
+                boundary_line = self.read_multipart_part(stream, boundary, final_boundary, file_obj)
+                file_obj.seek(0)
+                files[name] = {"filename": filename_match.group(1), "file": file_obj}
+            else:
+                buffer = BytesIO()
+                boundary_line = self.read_multipart_part(stream, boundary, final_boundary, buffer)
+                fields[name] = buffer.getvalue().decode("utf-8", errors="replace")
+            if boundary_line == "final":
+                return fields, files
+
+        return fields, files
+
+    def read_multipart_part(self, stream: BinaryIO, boundary: bytes, final_boundary: bytes, destination: BinaryIO) -> str:
+        previous: bytes | None = None
+        while True:
+            line = stream.readline(65536)
+            if not line:
+                if previous:
+                    destination.write(previous)
+                return "eof"
+            stripped = line.rstrip(b"\r\n")
+            if stripped in {boundary, final_boundary}:
+                if previous:
+                    destination.write(previous.removesuffix(b"\r\n").removesuffix(b"\n"))
+                return "final" if stripped == final_boundary else "next"
+            if previous:
+                destination.write(previous)
+            previous = line
+
+    def skip_multipart_part(self, stream: BinaryIO, boundary: bytes, final_boundary: bytes) -> str:
+        return self.read_multipart_part(stream, boundary, final_boundary, BytesIO())
+
+    def read_optional_upload(self, upload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if upload is None or not upload.get("filename") or upload.get("file") is None:
+            return None
+        file_obj = upload["file"]
+        try:
+            file_obj.seek(0)
+        except (AttributeError, OSError):
+            pass
+        return {"filename": upload["filename"], "content": file_obj.read()}
 
     def validate_thumbnail_upload(self, upload: dict[str, Any]) -> str:
         filename = Path(str(upload.get("filename", ""))).name
