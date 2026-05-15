@@ -108,12 +108,22 @@ install_chromium() {
 
 if command -v apt-get >/dev/null 2>&1; then
   run_as_root apt-get update
-  run_as_root apt-get install -y python3 python3-venv python3-pip python3-pygame rsync
+  run_as_root apt-get install -y python3 python3-venv python3-pip python3-pygame rsync nodejs npm
   install_chromium
 
   if [[ "${INSTALL_KIOSK}" == "1" ]]; then
     run_as_root apt-get install -y xserver-xorg xinit x11-xserver-utils x11-utils matchbox-window-manager unclutter
   fi
+fi
+
+if ! command -v pnpm >/dev/null 2>&1; then
+  run_as_root npm install -g pnpm
+fi
+
+PNPM_BIN="$(command -v pnpm || true)"
+if [[ -z "${PNPM_BIN}" ]]; then
+  echo "Warning: pnpm was not found. Replit React/Vite imports will not build until pnpm is installed." >&2
+  PNPM_BIN="pnpm"
 fi
 
 if [[ "${INSTALL_KIOSK}" == "1" ]]; then
@@ -147,6 +157,7 @@ BITCADE_IMPORT_COMMAND_TIMEOUT=600
 BITCADE_SEED_SAMPLES=1
 BITCADE_GAME_DISPLAY=:0
 BITCADE_PYTHON_GAME_BIN=/usr/bin/python3
+BITCADE_PNPM_BIN=${PNPM_BIN}
 ENV
   run_as_root chmod 640 "${ENV_FILE}"
 fi

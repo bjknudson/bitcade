@@ -734,6 +734,7 @@ class BitcadeApp:
         self.default_admin_username = os.environ.get("BITCADE_DEFAULT_ADMIN_USERNAME", DEFAULT_ADMIN_USERNAME)
         self.default_admin_password = os.environ.get("BITCADE_DEFAULT_ADMIN_PASSWORD", DEFAULT_ADMIN_PASSWORD)
         self.python_game_bin = os.environ.get("BITCADE_PYTHON_GAME_BIN", "/usr/bin/python3")
+        self.pnpm_bin = os.environ.get("BITCADE_PNPM_BIN", "pnpm")
         self.game_display = os.environ.get("BITCADE_GAME_DISPLAY", ":0")
         self.import_command_timeout = int(os.environ.get("BITCADE_IMPORT_COMMAND_TIMEOUT", "600"))
         if config:
@@ -745,6 +746,7 @@ class BitcadeApp:
             self.default_admin_username = str(config.get("BITCADE_DEFAULT_ADMIN_USERNAME", self.default_admin_username))
             self.default_admin_password = str(config.get("BITCADE_DEFAULT_ADMIN_PASSWORD", self.default_admin_password))
             self.python_game_bin = str(config.get("BITCADE_PYTHON_GAME_BIN", self.python_game_bin))
+            self.pnpm_bin = str(config.get("BITCADE_PNPM_BIN", self.pnpm_bin))
             self.game_display = str(config.get("BITCADE_GAME_DISPLAY", self.game_display))
             self.import_command_timeout = int(config.get("BITCADE_IMPORT_COMMAND_TIMEOUT", self.import_command_timeout))
         self.games_dir = self.data_dir / "games"
@@ -1759,7 +1761,8 @@ class BitcadeApp:
             if "build" not in scripts:
                 raise ValueError("No package name found and artifact package.json has no build script.")
 
-        if shutil.which("pnpm") is None:
+        resolved_pnpm = shutil.which(self.pnpm_bin) or (self.pnpm_bin if Path(self.pnpm_bin).is_file() else "")
+        if not resolved_pnpm:
             raise ValueError("pnpm is required but was not found.")
 
         port = self.assign_static_web_port()
@@ -1768,14 +1771,14 @@ class BitcadeApp:
         install_log = log_dir / "install.log"
         build_log = log_dir / "build.log"
         install_command = "pnpm install --frozen-lockfile"
-        build_args = ["pnpm", "--filter", package_name, "run", "build"] if package_name else ["pnpm", "run", "build"]
+        build_args = [resolved_pnpm, "--filter", package_name, "run", "build"] if package_name else [resolved_pnpm, "run", "build"]
         build_command = (
             f"PORT=${{PORT}} BASE_PATH=/ pnpm --filter {package_name} run build"
             if package_name
             else "PORT=${PORT} BASE_PATH=/ pnpm run build"
         )
 
-        self.run_logged_command(["pnpm", "install", "--frozen-lockfile"], workspace_root, install_log)
+        self.run_logged_command([resolved_pnpm, "install", "--frozen-lockfile"], workspace_root, install_log)
         build_cwd = workspace_root if package_name else artifact["path"]
         self.run_logged_command(build_args, build_cwd, build_log, env_updates={"PORT": str(port), "BASE_PATH": "/"})
         shutil.copy2(install_log, workspace_root / "install.log")
