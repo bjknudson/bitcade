@@ -184,12 +184,64 @@ class ReplitReactViteWebTests(unittest.TestCase):
             archive.writestr("Goal-Defender/artifacts/rocket-league-2d/index.html", "<div id=\"root\"></div>")
             archive.writestr("Goal-Defender/artifacts/rocket-league-2d/vite.config.ts", "export default {}")
             archive.writestr("Goal-Defender/artifacts/rocket-league-2d/src/main.tsx", "console.log('game')")
+            archive.writestr("Goal-Defender/artifacts/api-server/build.mjs", "export {}")
+            archive.writestr("Goal-Defender/artifacts/api-server/dist/index.mjs.map", "{}")
+            archive.writestr("Goal-Defender/lib/api-client-react/tsconfig.tsbuildinfo", "{}")
+            archive.writestr("Goal-Defender/artifacts/api-server/src/lib/.gitkeep", "")
+            archive.writestr("Goal-Defender/scripts/post-merge.sh", "echo ignored")
 
         extracted = self.app.extract_and_validate_zip(zip_path, self.root / "extract", "goal-defender")
 
         self.assertFalse((extracted / "node_modules").exists())
         self.assertFalse((extracted / ".git").exists())
         self.assertTrue((extracted / "artifacts" / "rocket-league-2d" / "index.html").is_file())
+        self.assertTrue((extracted / "artifacts" / "api-server" / "build.mjs").is_file())
+        self.assertFalse((extracted / "artifacts" / "api-server" / "src" / "lib" / ".gitkeep").exists())
+        self.assertFalse((extracted / "scripts" / "post-merge.sh").exists())
+
+    def test_replit_import_sanitizes_package_manager_guard_and_native_overrides(self) -> None:
+        workspace = self.make_workspace()
+        (workspace / "package.json").write_text(
+            json.dumps({"scripts": {"preinstall": 'sh -c \'case "$npm_config_user_agent" in pnpm/*) ;; *) echo "Use pnpm instead"; exit 1 ;; esac\''}}),
+            encoding="utf-8",
+        )
+        (workspace / "pnpm-workspace.yaml").write_text(
+            "\n".join(
+                [
+                    "packages:",
+                    "  - artifacts/*",
+                    "overrides:",
+                    "  # replit uses linux-x64 only, we can exclude all other platforms",
+                    '  "rollup>@rollup/rollup-darwin-arm64": "-"',
+                    "catalog:",
+                    "  vite: ^7.3.0",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        self.app.remove_replit_package_manager_guard(workspace)
+        removed = self.app.remove_replit_native_package_overrides(workspace)
+
+        self.assertTrue(removed)
+        package = json.loads((workspace / "package.json").read_text(encoding="utf-8"))
+        self.assertNotIn("preinstall", package["scripts"])
+        workspace_yaml = (workspace / "pnpm-workspace.yaml").read_text(encoding="utf-8")
+        self.assertNotIn('rollup>@rollup/rollup-darwin-arm64', workspace_yaml)
+        self.assertIn("catalog:", workspace_yaml)
+
+    def test_replit_import_infers_shift_for_wasd_second_player_boost(self) -> None:
+        workspace = self.make_workspace()
+        artifact = workspace / "artifacts" / "rocket-league-2d"
+        (artifact / "src" / "main.tsx").write_text(
+            'window.addEventListener("keydown", onKey); const keys = { left: "a", right: "d", jump: "w", boost: "Shift" }; <button onClick={start}>Start</button>',
+            encoding="utf-8",
+        )
+
+        controls, warnings = self.app.infer_replit_vite_controls(artifact)
+
+        self.assertEqual(controls["player2"]["a"], "Shift")
+        self.assertIn("clickable React menu", warnings[0])
 
     def test_upload_multipart_parser_returns_package_stream(self) -> None:
         boundary = "bitcade-test-boundary"

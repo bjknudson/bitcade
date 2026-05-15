@@ -48,9 +48,12 @@ ALLOWED_PACKAGE_EXTENSIONS = {
     ".html",
     ".css",
     ".js",
+    ".mjs",
     ".json",
+    ".map",
     ".toml",
     ".ts",
+    ".tsbuildinfo",
     ".tsx",
     ".yaml",
     ".yml",
@@ -73,7 +76,7 @@ ALLOWED_PACKAGE_EXTENSIONS = {
 }
 ALLOWED_PACKAGE_FILENAMES = {".gitignore", ".npmrc", ".replit", ".replitignore", "pnpm-lock.yaml", "pnpm-workspace.yaml", "package.json"}
 BLOCKED_PACKAGE_EXTENSIONS = {".exe", ".dmg", ".pkg", ".sh", ".command", ".bat", ".app", ".jar"}
-IGNORED_PACKAGE_NAMES = {".ds_store", "thumbs.db"}
+IGNORED_PACKAGE_NAMES = {".ds_store", "thumbs.db", ".gitkeep"}
 EXCLUDED_IMPORT_DIR_NAMES = {".git", ".agents", ".local", "node_modules"}
 THUMBNAIL_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 BRANDING_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".svg", ".webp"}
@@ -306,6 +309,10 @@ def safe_package_path(path: str) -> str:
 
 def safe_url_path(path: str) -> str:
     return safe_package_path(unquote(path).lstrip("/"))
+
+
+def is_ignorable_replit_workspace_file(parts: tuple[str, ...]) -> bool:
+    return len(parts) >= 2 and parts[-2] == "scripts" and parts[-1].lower().endswith(".sh")
 
 
 def read_metadata(game_dir: Path) -> dict[str, Any]:
@@ -1747,6 +1754,8 @@ class BitcadeApp:
                         continue
                     extension = Path(parts[-1]).suffix.lower()
                     if extension in BLOCKED_PACKAGE_EXTENSIONS:
+                        if is_ignorable_replit_workspace_file(parts):
+                            continue
                         raise ValueError(f"Blocked file type in package: {package_path}")
                     if extension not in ALLOWED_PACKAGE_EXTENSIONS and parts[-1].lower() not in ALLOWED_PACKAGE_FILENAMES:
                         raise ValueError(f"Unsupported file type in package: {package_path}")
@@ -1962,14 +1971,18 @@ class BitcadeApp:
 
         resolved_pnpm = shutil.which(self.pnpm_bin) or (self.pnpm_bin if Path(self.pnpm_bin).is_file() else "")
         if not resolved_pnpm:
-            raise ValueError("pnpm is required but was not found.")
+            raise ValueError("pnpm is required but was not found. Install pnpm before importing Replit React/Vite workspaces.")
 
         port = self.assign_static_web_port()
         log_dir = self.logs_dir / f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{slugify(Path(original_name).stem)}"
         log_dir.mkdir(parents=True, exist_ok=True)
         install_log = log_dir / "install.log"
+        approve_builds_log = log_dir / "approve-builds.log"
         build_log = log_dir / "build.log"
-        install_command = "pnpm install --frozen-lockfile"
+        self.remove_replit_package_manager_guard(workspace_root)
+        relaxed_lockfile = self.remove_replit_native_package_overrides(workspace_root)
+        install_args = ["install", "--no-frozen-lockfile"] if relaxed_lockfile else ["install", "--frozen-lockfile"]
+        install_command = "pnpm " + " ".join(install_args)
         build_args = [resolved_pnpm, "--filter", package_name, "run", "build"] if package_name else [resolved_pnpm, "run", "build"]
         build_command = (
             f"PORT=${{PORT}} BASE_PATH=/ pnpm --filter {package_name} run build"
@@ -1977,10 +1990,18 @@ class BitcadeApp:
             else "PORT=${PORT} BASE_PATH=/ pnpm run build"
         )
 
-        self.run_logged_command([resolved_pnpm, "install", "--frozen-lockfile"], workspace_root, install_log)
+        try:
+            self.run_logged_command([resolved_pnpm, *install_args], workspace_root, install_log)
+        except ValueError:
+            if "[ERR_PNPM_IGNORED_BUILDS]" not in install_log.read_text(encoding="utf-8", errors="replace"):
+                raise
+            self.run_logged_command([resolved_pnpm, "approve-builds", "--all"], workspace_root, approve_builds_log)
+            self.run_logged_command([resolved_pnpm, *install_args], workspace_root, install_log)
         build_cwd = workspace_root if package_name else artifact["path"]
         self.run_logged_command(build_args, build_cwd, build_log, env_updates={"PORT": str(port), "BASE_PATH": "/"})
         shutil.copy2(install_log, workspace_root / "install.log")
+        if approve_builds_log.exists():
+            shutil.copy2(approve_builds_log, workspace_root / "approve-builds.log")
         shutil.copy2(build_log, workspace_root / "build.log")
         entry = self.verify_replit_static_output(workspace_root, artifact, require_existing=True)
         public_dir = str(PurePosixPath(entry).parent)
@@ -1995,6 +2016,42 @@ class BitcadeApp:
         )
         (workspace_root / "bitcade.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
         return metadata
+
+    def remove_replit_package_manager_guard(self, workspace_root: Path) -> None:
+        package_path = workspace_root / "package.json"
+        try:
+            package = json.loads(package_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        scripts = package.get("scripts")
+        if not isinstance(scripts, dict):
+            return
+        preinstall = str(scripts.get("preinstall") or "")
+        if "npm_config_user_agent" not in preinstall or "Use pnpm instead" not in preinstall:
+            return
+        scripts.pop("preinstall", None)
+        package_path.write_text(json.dumps(package, indent=2) + "\n", encoding="utf-8")
+
+    def remove_replit_native_package_overrides(self, workspace_root: Path) -> bool:
+        workspace_path = workspace_root / "pnpm-workspace.yaml"
+        try:
+            lines = workspace_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return False
+        filtered = []
+        removed = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("# replit uses linux-x64"):
+                removed = True
+                continue
+            if stripped.endswith(': "-"') or stripped.endswith(": '-'"):
+                removed = True
+                continue
+            filtered.append(line)
+        if removed:
+            workspace_path.write_text("\n".join(filtered) + "\n", encoding="utf-8")
+        return removed
 
     def run_logged_command(
         self,
@@ -2068,6 +2125,7 @@ class BitcadeApp:
         artifact_metadata = artifact.get("metadata") if isinstance(artifact.get("metadata"), dict) else {}
         title = str(artifact_metadata.get("title") or artifact["path"].name.replace("-", " ").title())
         package_name = str(artifact.get("packageName") or "")
+        controls, control_warnings = self.infer_replit_vite_controls(artifact["path"])
         diagnostics = {
             "detectedAdapter": REPLIT_REACT_VITE_WEB_PLATFORM,
             "workspaceRoot": ".",
@@ -2078,7 +2136,7 @@ class BitcadeApp:
             "buildCommand": build_command.replace("${PORT}", str(port)),
             "publicDirectory": public_dir,
             "runtime": "static-web",
-            "warnings": [],
+            "warnings": control_warnings,
         }
         if not artifact.get("metadataFile"):
             diagnostics["warnings"].append("No artifact.toml found")
@@ -2131,15 +2189,29 @@ class BitcadeApp:
                 "supportsGamepad": False,
                 "allowsSharedKeyboard": True,
             },
-            "controls": {
-                "player1": {"up": "ArrowUp", "down": "ArrowDown", "left": "ArrowLeft", "right": "ArrowRight", "a": "Space", "b": "Shift", "start": "Enter"},
-                "player2": {"up": "W", "down": "S", "left": "A", "right": "D", "a": "F", "b": "G", "start": "R"},
-                "system": {"exit": "Escape", "menu": "Escape"},
-                "editable": True,
-            },
+            "controls": controls,
             "safety": {"approved": False, "network": "local-only"},
             "importDiagnostics": diagnostics,
         }
+
+    def infer_replit_vite_controls(self, artifact_root: Path) -> tuple[dict[str, Any], list[str]]:
+        controls: dict[str, Any] = {
+            "player1": {"up": "ArrowUp", "down": "ArrowDown", "left": "ArrowLeft", "right": "ArrowRight", "a": "Space", "b": "Shift", "start": "Enter"},
+            "player2": {"up": "W", "down": "S", "left": "A", "right": "D", "a": "F", "b": "G", "start": "R"},
+            "system": {"exit": "Escape", "menu": "Escape"},
+            "editable": True,
+        }
+        source_text = "\n".join(
+            path.read_text(encoding="utf-8", errors="replace")
+            for path in sorted((artifact_root / "src").rglob("*"))
+            if path.is_file() and path.suffix.lower() in {".js", ".jsx", ".ts", ".tsx"}
+        )
+        warnings: list[str] = []
+        if all(token in source_text for token in ('left: "a"', 'right: "d"', 'jump: "w"', 'boost: "Shift"')):
+            controls["player2"]["a"] = "Shift"
+        if "onClick" in source_text and "addEventListener(\"keydown\"" in source_text:
+            warnings.append("Game source uses clickable React menu controls; verify the menu can be started without a mouse.")
+        return controls, warnings
 
     def assign_static_web_port(self) -> int:
         for port in range(4107, 4199):
