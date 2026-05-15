@@ -76,7 +76,9 @@ BLOCKED_PACKAGE_EXTENSIONS = {".exe", ".dmg", ".pkg", ".sh", ".command", ".bat",
 IGNORED_PACKAGE_NAMES = {".ds_store", "thumbs.db"}
 EXCLUDED_IMPORT_DIR_NAMES = {".git", ".agents", ".local", "node_modules"}
 THUMBNAIL_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+BRANDING_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".svg", ".webp"}
 MAX_THUMBNAIL_BYTES = 5 * 1024 * 1024
+MAX_BRANDING_IMAGE_BYTES = 2 * 1024 * 1024
 MAX_UPLOAD_BYTES = 250 * 1024 * 1024
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "bitcade"
@@ -106,6 +108,87 @@ KEY_OPTIONS = (
     "Slash",
     "Period",
 )
+
+COLOR_PALETTES = {
+    "classic": {
+        "name": "Classic arcade",
+        "background": "#111426",
+        "panel": "#1c2140",
+        "panel_2": "#252b52",
+        "text": "#f8fbff",
+        "muted": "#b7c1d9",
+        "accent": "#61f0c1",
+        "accent_2": "#ffcf5a",
+    },
+    "school": {
+        "name": "School spirit",
+        "background": "#0f172a",
+        "panel": "#1e293b",
+        "panel_2": "#334155",
+        "text": "#f8fafc",
+        "muted": "#cbd5e1",
+        "accent": "#38bdf8",
+        "accent_2": "#facc15",
+    },
+    "library": {
+        "name": "Library calm",
+        "background": "#10231f",
+        "panel": "#173b32",
+        "panel_2": "#235347",
+        "text": "#f7fee7",
+        "muted": "#cbd5c0",
+        "accent": "#86efac",
+        "accent_2": "#fbbf24",
+    },
+    "mono": {
+        "name": "High contrast",
+        "background": "#050505",
+        "panel": "#18181b",
+        "panel_2": "#27272a",
+        "text": "#ffffff",
+        "muted": "#d4d4d8",
+        "accent": "#ffffff",
+        "accent_2": "#f97316",
+    },
+}
+
+LAYOUT_OPTIONS = {
+    "arcade": "Large arcade hero with game cards",
+    "compact": "Compact class kiosk",
+    "showcase": "Institution showcase with wider cards",
+}
+
+THUMBNAIL_RATIOS = {
+    "16 / 9": "16:9 widescreen",
+    "4 / 3": "4:3 classic monitor",
+    "1 / 1": "Square cards",
+}
+
+DEFAULT_PLAY_LAYOUT = {
+    "screen_width": DEFAULT_DISPLAY_WIDTH,
+    "screen_height": DEFAULT_DISPLAY_HEIGHT,
+    "safe_margin": 32,
+    "content_width": 1536,
+    "card_min_width": 288,
+    "grid_gap": 19,
+    "hero_scale": 100,
+    "thumbnail_ratio": "16 / 9",
+}
+
+DEFAULT_BRANDING = {
+    "install_name": "Bitcade",
+    "site_title": "Bitcade",
+    "tagline": "Choose a local game",
+    "welcome_text": "Approved games are served from local Bitcade storage and launch on the Bitcade machine.",
+    "student_upload_label": "Student upload code",
+    "logo_path": "",
+    "mark_path": "",
+    "layout": "arcade",
+    "palette": "classic",
+    "colors": COLOR_PALETTES["classic"],
+    "play_layout": DEFAULT_PLAY_LAYOUT,
+}
+
 DEFAULT_CABINET_PROFILE = {
     "name": "Default gamepad",
     "players": {
@@ -394,20 +477,79 @@ def verify_password(password: str, stored_hash: str) -> bool:
         return False
 
 
-def html_page(title: str, body: str, *, body_class: str = "", show_chrome: bool = True) -> bytes:
-    body_class_attr = f' class="{html.escape(body_class)}"' if body_class else ""
-    header = """
+def css_variable_block(branding: dict[str, Any] | None) -> str:
+    if not branding:
+        return ""
+    colors = branding.get("colors", {}) if isinstance(branding.get("colors"), dict) else {}
+    mapping = {
+        "background": "--bg",
+        "panel": "--panel",
+        "panel_2": "--panel-2",
+        "text": "--text",
+        "muted": "--muted",
+        "accent": "--accent",
+        "accent_2": "--accent-2",
+    }
+    declarations = []
+    for key, variable in mapping.items():
+        value = str(colors.get(key, "")).strip()
+        if re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            declarations.append(f"{variable}: {value};")
+    play_layout = branding.get("play_layout", {}) if isinstance(branding.get("play_layout"), dict) else {}
+    pixel_variables = {
+        "safe_margin": "--play-safe-margin",
+        "content_width": "--play-max-width",
+        "card_min_width": "--play-card-min",
+        "grid_gap": "--play-grid-gap",
+    }
+    for key, variable in pixel_variables.items():
+        try:
+            value = int(play_layout.get(key, DEFAULT_PLAY_LAYOUT[key]))
+        except (TypeError, ValueError):
+            value = int(DEFAULT_PLAY_LAYOUT[key])
+        declarations.append(f"{variable}: {value}px;")
+    try:
+        hero_scale = int(play_layout.get("hero_scale", DEFAULT_PLAY_LAYOUT["hero_scale"])) / 100
+    except (TypeError, ValueError):
+        hero_scale = DEFAULT_PLAY_LAYOUT["hero_scale"] / 100
+    declarations.append(f"--play-hero-scale: {hero_scale:.2f};")
+    thumbnail_ratio = str(play_layout.get("thumbnail_ratio", DEFAULT_PLAY_LAYOUT["thumbnail_ratio"]))
+    if thumbnail_ratio not in THUMBNAIL_RATIOS:
+        thumbnail_ratio = DEFAULT_PLAY_LAYOUT["thumbnail_ratio"]
+    declarations.append(f"--play-thumbnail-ratio: {thumbnail_ratio};")
+    if not declarations:
+        return ""
+    return f"<style>:root {{{' '.join(declarations)}}}</style>"
+
+
+def html_page(title: str, body: str, *, body_class: str = "", show_chrome: bool = True, branding: dict[str, Any] | None = None) -> bytes:
+    layout_class = ""
+    if branding and show_chrome:
+        layout = str(branding.get("layout", "arcade"))
+        if layout in LAYOUT_OPTIONS:
+            layout_class = f" layout-{layout}"
+    full_body_class = f"{body_class}{layout_class}".strip()
+    body_class_attr = f' class="{html.escape(full_body_class)}"' if full_body_class else ""
+    install_name = str((branding or {}).get("install_name") or "Bitcade")
+    logo_path = str((branding or {}).get("logo_path") or "").strip()
+    logo = f'<img class="brand-logo" src="/branding-assets/{quote(logo_path)}" alt="">' if logo_path else ""
+    brand_label = f'<span>{html.escape(install_name)}</span>'
+    header = f"""
   <header class="topbar">
-    <a class="brand" href="/play">Bitcade</a>
+    <a class="brand" href="/play">{logo}{brand_label}</a>
     <nav><a href="/play">Play</a><a href="/student">Student Upload</a><a href="/admin">Admin</a></nav>
   </header>""" if show_chrome else ""
+    css_vars = css_variable_block(branding)
+    site_title = str((branding or {}).get("site_title") or install_name)
+    page_title = f"{title} · {site_title}" if branding and site_title and site_title not in title else title
     return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{html.escape(title)}</title>
+  <title>{html.escape(page_title)}</title>
   <link rel="stylesheet" href="/static/bitcade.css">
+  {css_vars}
 </head>
 <body{body_class_attr}>{header}
   <main>{body}</main>
@@ -752,6 +894,7 @@ class BitcadeApp:
         self.games_dir = self.data_dir / "games"
         self.uploads_dir = self.data_dir / "uploads"
         self.thumbnails_dir = self.data_dir / "thumbnails"
+        self.branding_dir = self.data_dir / "branding"
         self.logs_dir = self.data_dir / "logs"
         self.running_native_games: dict[str, subprocess.Popen[bytes]] = {}
         self.ensure_runtime_dirs()
@@ -760,7 +903,7 @@ class BitcadeApp:
             self.seed_sample_games()
 
     def ensure_runtime_dirs(self) -> None:
-        for path in (self.data_dir, self.games_dir, self.uploads_dir, self.thumbnails_dir, self.logs_dir):
+        for path in (self.data_dir, self.games_dir, self.uploads_dir, self.thumbnails_dir, self.branding_dir, self.logs_dir):
             path.mkdir(parents=True, exist_ok=True)
 
     def connect(self) -> sqlite3.Connection:
@@ -802,6 +945,8 @@ class BitcadeApp:
             conn.execute("INSERT INTO settings (key, value) VALUES ('cabinet_profile', ?)", (json.dumps(DEFAULT_CABINET_PROFILE),))
         if conn.execute("SELECT value FROM settings WHERE key = 'install_profile'").fetchone() is None:
             conn.execute("INSERT INTO settings (key, value) VALUES ('install_profile', ?)", (json.dumps(self.default_install_profile()),))
+        if conn.execute("SELECT value FROM settings WHERE key = 'branding'").fetchone() is None:
+            conn.execute("INSERT INTO settings (key, value) VALUES ('branding', ?)", (json.dumps(DEFAULT_BRANDING),))
 
     def cabinet_profile(self) -> dict[str, Any]:
         try:
@@ -864,6 +1009,32 @@ class BitcadeApp:
         if not isinstance(profile, dict):
             return self.default_install_profile()
         return profile
+
+    def default_branding(self) -> dict[str, Any]:
+        return json.loads(json.dumps(DEFAULT_BRANDING))
+
+    def branding(self) -> dict[str, Any]:
+        try:
+            stored = json.loads(self.get_setting("branding"))
+        except (json.JSONDecodeError, ValueError):
+            stored = {}
+        branding = self.default_branding()
+        if isinstance(stored, dict):
+            branding.update({key: stored.get(key, branding[key]) for key in branding.keys()})
+            colors = stored.get("colors")
+            if isinstance(colors, dict):
+                branding["colors"] = {**branding["colors"], **colors}
+            play_layout = stored.get("play_layout")
+            if isinstance(play_layout, dict):
+                branding["play_layout"] = {**branding["play_layout"], **play_layout}
+        if branding.get("layout") not in LAYOUT_OPTIONS:
+            branding["layout"] = "arcade"
+        if branding.get("palette") not in COLOR_PALETTES:
+            branding["palette"] = "classic"
+        return branding
+
+    def html_page(self, title: str, body: str, *, body_class: str = "", show_chrome: bool = True) -> bytes:
+        return html_page(title, body, body_class=body_class, show_chrome=show_chrome, branding=self.branding())
 
     def install_profile_exports(self) -> dict[str, str]:
         profile = self.install_profile()
@@ -999,7 +1170,7 @@ class BitcadeApp:
         return self.redirect(start_response, f"/admin?message={quote(message)}&level={quote(level)}")
 
     def not_found(self, start_response):
-        return self.response(start_response, "404 Not Found", html_page("Not found", "<h1>Not found</h1>"))
+        return self.response(start_response, "404 Not Found", self.html_page("Not found", "<h1>Not found</h1>"))
 
     def get_setting(self, key: str) -> str:
         with self.connect() as conn:
@@ -1118,6 +1289,8 @@ class BitcadeApp:
             return self.serve_game_file(start_response, path.removeprefix("/game-files/"))
         if path.startswith("/thumbnails/"):
             return self.serve_thumbnail(start_response, path.removeprefix("/thumbnails/"))
+        if path.startswith("/branding-assets/"):
+            return self.serve_branding_asset(start_response, path.removeprefix("/branding-assets/"))
         if path.startswith("/static/"):
             return self.serve_static(start_response, path.removeprefix("/static/"))
         if path == "/admin/login":
@@ -1146,6 +1319,9 @@ class BitcadeApp:
         if path == "/admin/input":
             query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
             return self.response(start_response, "200 OK", self.render_input_settings(first_form_value(query, "message"), first_form_value(query, "level", "info")))
+        if path == "/admin/branding":
+            query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+            return self.response(start_response, "200 OK", self.render_branding_settings(first_form_value(query, "message"), first_form_value(query, "level", "info")))
         if path.startswith("/admin/games/") and path.endswith("/preview"):
             game_id = safe_url_path(path.removeprefix("/admin/games/").removesuffix("/preview"))
             return self.preview_game(start_response, game_id)
@@ -1176,6 +1352,11 @@ class BitcadeApp:
                 form = self.parse_urlencoded(environ)
                 self.update_install_profile(form)
                 return self.redirect(start_response, "/admin/input?message=Install%20profile%20updated.")
+            if path == "/admin/branding":
+                content_length = int(environ.get("CONTENT_LENGTH") or 0)
+                fields, files = self.parse_multipart(environ, content_length)
+                self.update_branding_settings({key: [value] for key, value in fields.items()}, files)
+                return self.redirect(start_response, "/admin/branding?message=Branding%20settings%20updated.")
             if path.startswith("/admin/games/") and path.endswith("/status"):
                 game_id = safe_url_path(path.removeprefix("/admin/games/").removesuffix("/status"))
                 form = self.parse_urlencoded(environ)
@@ -1201,6 +1382,8 @@ class BitcadeApp:
                 return self.redirect(start_response, f"/admin/login?message={quote(str(error))}&level=error")
             if path == "/admin/change-password":
                 return self.redirect(start_response, f"/admin/change-password?message={quote(str(error))}&level=error")
+            if path == "/admin/branding":
+                return self.redirect(start_response, f"/admin/branding?message={quote(str(error))}&level=error")
             if path == "/student/upload":
                 return self.redirect(start_response, f"/student?message={quote(str(error))}&level=error")
             return self.redirect_admin(start_response, str(error), "error")
@@ -2281,18 +2464,30 @@ class BitcadeApp:
                 <ul class="badges">{''.join(f'<li>{badge}</li>' for badge in badges)}</ul>
               </div>
             </a>""")
+        branding = self.branding()
+        mark_path = str(branding.get("mark_path") or "").strip()
+        mark = f'<img class="hero-mark" src="/branding-assets/{quote(mark_path)}" alt="">' if mark_path else ""
         body = """
         <div class="arcade-menu">
-        <section class="hero">
-          <p class="eyebrow">Phase 1 browser arcade</p>
-          <h1>Choose a local game</h1>
-          <p>Approved games are served from local Bitcade storage and launch on the Bitcade machine.</p>
-          <p class="screen-code">Student upload code <strong>{code}</strong></p>
+        <section class="hero branded-hero">
+          {mark}
+          <p class="eyebrow">{install_name}</p>
+          <h1>{tagline}</h1>
+          <p>{welcome_text}</p>
+          <p class="screen-code">{upload_label} <strong>{code}</strong></p>
         </section>
         <section class="grid" aria-label="Approved games">{cards}</section>
         </div>
-        """.format(cards="".join(cards) or '<p class="empty">No approved games yet.</p>', code=self.current_screen_code())
-        return html_page("Bitcade Play", body)
+        """.format(
+            mark=mark,
+            install_name=html.escape(str(branding.get("install_name") or "Bitcade")),
+            tagline=html.escape(str(branding.get("tagline") or "Choose a local game")),
+            welcome_text=html.escape(str(branding.get("welcome_text") or "")),
+            upload_label=html.escape(str(branding.get("student_upload_label") or "Student upload code")),
+            cards="".join(cards) or '<p class="empty">No approved games yet.</p>',
+            code=self.current_screen_code(),
+        )
+        return self.html_page("Play", body, body_class="play-page")
 
     def render_game_info(self, start_response, game_id: str):
         with self.connect() as conn:
@@ -2327,7 +2522,7 @@ class BitcadeApp:
           </div>
         </section>
         """
-        return self.response(start_response, "200 OK", html_page(f"{game['title']} Info", body))
+        return self.response(start_response, "200 OK", self.html_page(f"{game['title']} Info", body))
 
     def launch_game(self, start_response, game_id: str):
         with self.connect() as conn:
@@ -2349,7 +2544,7 @@ class BitcadeApp:
         {GAME_FIT_SCRIPT}
         {game_input_script(self.cabinet_profile(), metadata.get("controls", {}), "/play")}
         """
-        return self.response(start_response, "200 OK", html_page(f"Playing {game['title']}", body, body_class="game-page", show_chrome=False))
+        return self.response(start_response, "200 OK", self.html_page(f"Playing {game['title']}", body, body_class="game-page", show_chrome=False))
 
     def preview_game(self, start_response, game_id: str):
         with self.connect() as conn:
@@ -2368,7 +2563,7 @@ class BitcadeApp:
         {GAME_FIT_SCRIPT}
         {game_input_script(self.cabinet_profile(), metadata.get("controls", {}), "/admin")}
         """
-        return self.response(start_response, "200 OK", html_page(f"Previewing {game['title']}", body, body_class="game-page", show_chrome=False))
+        return self.response(start_response, "200 OK", self.html_page(f"Previewing {game['title']}", body, body_class="game-page", show_chrome=False))
 
     def preview_student_game(self, start_response, game_id: str):
         with self.connect() as conn:
@@ -2387,7 +2582,7 @@ class BitcadeApp:
         {GAME_FIT_SCRIPT}
         {game_input_script(self.cabinet_profile(), metadata.get("controls", {}), "/student")}
         """
-        return self.response(start_response, "200 OK", html_page(f"Previewing {game['title']}", body, body_class="game-page", show_chrome=False))
+        return self.response(start_response, "200 OK", self.html_page(f"Previewing {game['title']}", body, body_class="game-page", show_chrome=False))
 
     def launch_native_python_game(self, start_response, game: dict[str, Any], return_path: str, preview: bool = False):
         game_id = str(game["id"])
@@ -2422,7 +2617,7 @@ class BitcadeApp:
                   <a class="button" href="{html.escape(return_path)}" data-nav-start>Return</a>
                 </section>
                 """
-                return self.response(start_response, "500 Internal Server Error", html_page("Python Launch Failed", body, body_class="game-page native-page", show_chrome=False))
+                return self.response(start_response, "500 Internal Server Error", self.html_page("Python Launch Failed", body, body_class="game-page native-page", show_chrome=False))
             self.running_native_games[game_id] = process
             status_text = "Launching"
         body = f"""
@@ -2434,7 +2629,7 @@ class BitcadeApp:
           <a class="button" href="{html.escape(return_path)}" data-nav-start>Return</a>
         </section>
         """
-        return self.response(start_response, "200 OK", html_page(f"Playing {game['title']}", body, body_class="game-page native-page", show_chrome=False))
+        return self.response(start_response, "200 OK", self.html_page(f"Playing {game['title']}", body, body_class="game-page native-page", show_chrome=False))
 
     def render_login(self, message: str = "", level: str = "info") -> bytes:
         alert = f'<p class="notice {html.escape(level)}">{html.escape(message)}</p>' if message else ""
@@ -2461,7 +2656,7 @@ class BitcadeApp:
           <button class="button" type="submit">Log in</button>
         </form>
         """
-        return html_page("Admin Login", body)
+        return self.html_page("Admin Login", body)
 
     def render_change_password(self, message: str = "", level: str = "info") -> bytes:
         alert = f'<p class="notice {html.escape(level)}">{html.escape(message)}</p>' if message else ""
@@ -2486,7 +2681,7 @@ class BitcadeApp:
           </div>
         </form>
         """
-        return html_page("Change Admin Password", body)
+        return self.html_page("Change Admin Password", body)
 
     def render_upload_guides(self, *, base_path: str = "/admin/guides", back_link: str = "/admin") -> bytes:
         cards = []
@@ -2514,15 +2709,15 @@ class BitcadeApp:
         <section class="grid">{''.join(cards)}</section>
         <p><a href="{html.escape(back_link)}">Back</a></p>
         """
-        return html_page("Upload Guides", body)
+        return self.html_page("Upload Guides", body)
 
     def render_upload_guide(self, guide_id: str, *, base_path: str = "/admin/guides", back_link: str = "/admin") -> bytes:
         guide = FORMAT_GUIDES.get(guide_id)
         if guide is None:
-            return html_page("Guide not found", f"<h1>Guide not found</h1><p><a href=\"{html.escape(base_path)}\">Back to guides</a></p>")
+            return self.html_page("Guide not found", f"<h1>Guide not found</h1><p><a href=\"{html.escape(base_path)}\">Back to guides</a></p>")
         doc_path = guide["doc_path"]
         if not doc_path.is_file():
-            return html_page("Guide missing", "<h1>Guide missing</h1><p>The guide file has not been created yet.</p>")
+            return self.html_page("Guide missing", "<h1>Guide missing</h1><p>The guide file has not been created yet.</p>")
         guide_html = render_markdown_reference(doc_path.read_text(encoding="utf-8"))
         template_action = ""
         if guide.get("template_path"):
@@ -2538,7 +2733,7 @@ class BitcadeApp:
         <article class="panel guide-body">{guide_html}</article>
         <p><a href="{html.escape(base_path)}">All upload guides</a> · <a href="{html.escape(back_link)}">Back to upload</a></p>
         """
-        return html_page(f"{guide['title']} Upload Guide", body)
+        return self.html_page(f"{guide['title']} Upload Guide", body)
 
     def render_install_profile_panel(self, *, compact: bool = False) -> str:
         exports = self.install_profile_exports()
@@ -2712,7 +2907,7 @@ class BitcadeApp:
           <p>Reference guides: <a href="/student/guides/p5js">p5.js</a> · <a href="/student/guides/python-pygame">Python/Pygame</a> · <a href="/student/guides">All formats</a></p>
         </section>
         """
-        return html_page("Student Upload", body)
+        return self.html_page("Student Upload", body)
 
     def download_upload_template(self, start_response, guide_id: str):
         guide = FORMAT_GUIDES.get(guide_id)
@@ -2755,7 +2950,7 @@ class BitcadeApp:
           <p class="eyebrow">Phase 2 admin</p>
           <h1>Manage games</h1>
           <p>Upload a Bitcade zip, validate it, preview it, then approve it for the arcade menu.</p>
-          <p><a href="/admin/input">Input settings</a> · <a href="/admin/change-password">Change password</a> · <a href="/admin/logout">Log out</a></p>
+          <p><a href="/admin/branding">Branding</a> · <a href="/admin/input">Input settings</a> · <a href="/admin/change-password">Change password</a> · <a href="/admin/logout">Log out</a></p>
         </section>
         {alert}
         <section class="panel">
@@ -2774,7 +2969,7 @@ class BitcadeApp:
           <tbody>{''.join(rows) or '<tr><td colspan="6">No games installed.</td></tr>'}</tbody>
         </table>
         """
-        return html_page("Bitcade Admin", body)
+        return self.html_page("Admin", body)
 
     def render_input_settings(self, message: str = "", level: str = "info") -> bytes:
         profile = self.cabinet_profile()
@@ -2899,7 +3094,253 @@ class BitcadeApp:
         }})();
         </script>
         """
-        return html_page("Input Settings", body)
+        return self.html_page("Input Settings", body)
+
+    def validate_branding_image_upload(self, upload: dict[str, Any]) -> str:
+        filename = Path(str(upload.get("filename", ""))).name
+        extension = Path(filename).suffix.lower()
+        content = upload.get("content", b"")
+        if not filename or not content:
+            raise ValueError("Branding image upload is empty.")
+        if extension not in BRANDING_IMAGE_EXTENSIONS:
+            raise ValueError("Branding images must be PNG, JPG, SVG, or WebP files.")
+        if len(content) > MAX_BRANDING_IMAGE_BYTES:
+            raise ValueError(f"Branding image exceeds the {MAX_BRANDING_IMAGE_BYTES // (1024 * 1024)} MB limit.")
+        return extension
+
+    def save_branding_image_upload(self, slot: str, upload: dict[str, Any]) -> str:
+        extension = self.validate_branding_image_upload(upload)
+        for existing in self.branding_dir.glob(f"{slot}.*"):
+            if existing.is_file():
+                existing.unlink()
+        filename = f"{slot}{extension}"
+        target = self.branding_dir / filename
+        target.write_bytes(upload["content"])
+        return filename
+
+    def normalize_branding_color(self, form: dict[str, list[str]], key: str, fallback: str) -> str:
+        value = first_form_value(form, key, fallback).strip()
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("Branding colors must use six-digit hex values, such as #61f0c1.")
+        return value.lower()
+
+    def normalize_layout_number(self, form: dict[str, list[str]], key: str, fallback: int, minimum: int, maximum: int) -> int:
+        try:
+            value = int(first_form_value(form, key, str(fallback)) or fallback)
+        except ValueError as error:
+            raise ValueError("Play-screen layout values must be whole numbers.") from error
+        if value < minimum or value > maximum:
+            raise ValueError(f"{key.replace('_', ' ').title()} must be between {minimum} and {maximum}.")
+        return value
+
+    def stored_layout_int(self, layout: dict[str, Any], key: str) -> int:
+        try:
+            return int(layout.get(key, DEFAULT_PLAY_LAYOUT[key]))
+        except (TypeError, ValueError):
+            return int(DEFAULT_PLAY_LAYOUT[key])
+
+    def normalize_play_layout_settings(self, form: dict[str, list[str]], current: dict[str, Any]) -> dict[str, Any]:
+        layout = current.get("play_layout", {}) if isinstance(current.get("play_layout"), dict) else {}
+        normalized = {
+            "screen_width": self.normalize_layout_number(form, "screen_width", self.stored_layout_int(layout, "screen_width"), 320, 10000),
+            "screen_height": self.normalize_layout_number(form, "screen_height", self.stored_layout_int(layout, "screen_height"), 240, 10000),
+            "safe_margin": self.normalize_layout_number(form, "safe_margin", self.stored_layout_int(layout, "safe_margin"), 0, 240),
+            "content_width": self.normalize_layout_number(form, "content_width", self.stored_layout_int(layout, "content_width"), 320, 10000),
+            "card_min_width": self.normalize_layout_number(form, "card_min_width", self.stored_layout_int(layout, "card_min_width"), 120, 1200),
+            "grid_gap": self.normalize_layout_number(form, "grid_gap", self.stored_layout_int(layout, "grid_gap"), 0, 120),
+            "hero_scale": self.normalize_layout_number(form, "hero_scale", self.stored_layout_int(layout, "hero_scale"), 50, 160),
+            "thumbnail_ratio": first_form_value(form, "thumbnail_ratio", str(layout.get("thumbnail_ratio", DEFAULT_PLAY_LAYOUT["thumbnail_ratio"]))).strip(),
+        }
+        if normalized["thumbnail_ratio"] not in THUMBNAIL_RATIOS:
+            raise ValueError("Unknown thumbnail ratio.")
+        if normalized["content_width"] > normalized["screen_width"]:
+            normalized["content_width"] = normalized["screen_width"]
+        return normalized
+
+    def update_branding_settings(self, form: dict[str, list[str]], files: dict[str, dict[str, Any]]) -> None:
+        current = self.branding()
+        palette = first_form_value(form, "palette", "custom").strip() or "custom"
+        if palette != "custom" and palette not in COLOR_PALETTES:
+            raise ValueError("Unknown color palette.")
+        layout = first_form_value(form, "layout", "arcade").strip() or "arcade"
+        if layout not in LAYOUT_OPTIONS:
+            raise ValueError("Unknown layout option.")
+        colors = dict(current.get("colors", COLOR_PALETTES["classic"]))
+        if palette in COLOR_PALETTES:
+            colors = dict(COLOR_PALETTES[palette])
+        for key in ("background", "panel", "panel_2", "text", "muted", "accent", "accent_2"):
+            colors[key] = self.normalize_branding_color(form, f"color_{key}", str(colors.get(key, COLOR_PALETTES["classic"].get(key, "#ffffff"))))
+        branding = {
+            "install_name": first_form_value(form, "install_name", str(current.get("install_name", "Bitcade"))).strip() or "Bitcade",
+            "site_title": first_form_value(form, "site_title", str(current.get("site_title", "Bitcade"))).strip() or "Bitcade",
+            "tagline": first_form_value(form, "tagline", str(current.get("tagline", "Choose a local game"))).strip() or "Choose a local game",
+            "welcome_text": first_form_value(form, "welcome_text", str(current.get("welcome_text", ""))).strip(),
+            "student_upload_label": first_form_value(form, "student_upload_label", str(current.get("student_upload_label", "Student upload code"))).strip() or "Student upload code",
+            "logo_path": str(current.get("logo_path", "")),
+            "mark_path": str(current.get("mark_path", "")),
+            "layout": layout,
+            "palette": palette,
+            "colors": colors,
+            "play_layout": self.normalize_play_layout_settings(form, current),
+        }
+        for slot, field in (("logo", "logo"), ("mark", "mark")):
+            raw_upload = files.get(field)
+            upload = raw_upload if raw_upload is not None and "content" in raw_upload else self.read_optional_upload(raw_upload)
+            if upload is not None and upload.get("filename"):
+                branding[f"{slot}_path"] = self.save_branding_image_upload(slot, upload)
+            if bool_from_form(form, f"clear_{field}"):
+                for existing in self.branding_dir.glob(f"{slot}.*"):
+                    if existing.is_file():
+                        existing.unlink()
+                branding[f"{slot}_path"] = ""
+        self.set_setting("branding", json.dumps(branding))
+
+    def render_branding_settings(self, message: str = "", level: str = "info") -> bytes:
+        branding = self.branding()
+        colors = branding.get("colors", {}) if isinstance(branding.get("colors"), dict) else {}
+        alert = f'<p class="notice {html.escape(level)}">{html.escape(message)}</p>' if message else ""
+        palette_options = f'<option value="custom"{" selected" if branding.get("palette") == "custom" else ""}>Custom colors</option>' + "".join(
+            f'<option value="{html.escape(key)}"{" selected" if key == branding.get("palette") else ""}>{html.escape(value["name"])}</option>'
+            for key, value in COLOR_PALETTES.items()
+        )
+        layout_options = "".join(
+            f'<label class="option-card"><input type="radio" name="layout" value="{html.escape(key)}"{" checked" if key == branding.get("layout") else ""}><span><strong>{html.escape(key.title())}</strong>{html.escape(description)}</span></label>'
+            for key, description in LAYOUT_OPTIONS.items()
+        )
+        play_layout = branding.get("play_layout", {}) if isinstance(branding.get("play_layout"), dict) else DEFAULT_PLAY_LAYOUT
+        ratio_options = "".join(
+            f'<option value="{html.escape(value)}"{" selected" if value == play_layout.get("thumbnail_ratio") else ""}>{html.escape(label)}</option>'
+            for value, label in THUMBNAIL_RATIOS.items()
+        )
+        color_fields = "".join(
+            f'<label>{html.escape(label)} <input type="color" name="color_{key}" value="{html.escape(str(colors.get(key, COLOR_PALETTES["classic"][key])))}"></label>'
+            for key, label in (
+                ("background", "Background"),
+                ("panel", "Panel"),
+                ("panel_2", "Card gradient"),
+                ("text", "Text"),
+                ("muted", "Muted text"),
+                ("accent", "Primary accent"),
+                ("accent_2", "Secondary accent"),
+            )
+        )
+        logo_preview = f'<img src="/branding-assets/{quote(str(branding.get("logo_path")))}" alt="Current logo">' if branding.get("logo_path") else '<span>No logo uploaded</span>'
+        mark_preview = f'<img src="/branding-assets/{quote(str(branding.get("mark_path")))}" alt="Current hero mark">' if branding.get("mark_path") else '<span>No hero mark uploaded</span>'
+        body = f"""
+        <section class="hero compact">
+          <p class="eyebrow">Admin branding</p>
+          <h1>Customize Bitcade</h1>
+          <p>Brand this install for your class, club, library, or institution with custom text, logos, layout, and color palette.</p>
+          <p><a href="/admin">Back to admin</a> · <a href="/admin/input">Input settings</a></p>
+        </section>
+        {alert}
+        <form class="panel edit-form branding-form" action="/admin/branding" method="post" enctype="multipart/form-data">
+          <h2>Name and welcome text</h2>
+          <div class="field-row">
+            <label>Install name <input name="install_name" value="{html.escape(str(branding.get('install_name', 'Bitcade')))}" required></label>
+            <label>Browser title <input name="site_title" value="{html.escape(str(branding.get('site_title', 'Bitcade')))}" required></label>
+          </div>
+          <label>Home page headline <input name="tagline" value="{html.escape(str(branding.get('tagline', 'Choose a local game')))}" required></label>
+          <label>Welcome text <textarea name="welcome_text" required>{html.escape(str(branding.get('welcome_text', '')))}</textarea></label>
+          <label>Upload code label <input name="student_upload_label" value="{html.escape(str(branding.get('student_upload_label', 'Student upload code')))}" required></label>
+          <h2>Logos</h2>
+          <div class="field-row logo-fields">
+            <div class="asset-preview">{logo_preview}</div>
+            <label>Header logo <input type="file" name="logo" accept="image/png,image/jpeg,image/svg+xml,image/webp"><span><input type="checkbox" name="clear_logo"> Clear header logo</span></label>
+            <div class="asset-preview">{mark_preview}</div>
+            <label>Hero mark <input type="file" name="mark" accept="image/png,image/jpeg,image/svg+xml,image/webp"><span><input type="checkbox" name="clear_mark"> Clear hero mark</span></label>
+          </div>
+          <h2>Layout</h2>
+          <div class="layout-options">{layout_options}</div>
+          <section class="layout-tools" aria-labelledby="play-layout-tools">
+            <div class="section-heading">
+              <div>
+                <h2 id="play-layout-tools">Play-screen layout tools</h2>
+                <p>Tune the arcade menu for the attached monitor. Use Detect on that display, then adjust card size and spacing until the game grid fits comfortably.</p>
+              </div>
+              <p class="profile-size"><span id="layout-summary">{html.escape(str(play_layout.get('screen_width', DEFAULT_DISPLAY_WIDTH)))}×{html.escape(str(play_layout.get('screen_height', DEFAULT_DISPLAY_HEIGHT)))}</span></p>
+            </div>
+            <div class="field-row">
+              <label>Monitor width <input id="screen-width" type="number" name="screen_width" min="320" max="10000" value="{html.escape(str(play_layout.get('screen_width', DEFAULT_PLAY_LAYOUT['screen_width'])))}" required></label>
+              <label>Monitor height <input id="screen-height" type="number" name="screen_height" min="240" max="10000" value="{html.escape(str(play_layout.get('screen_height', DEFAULT_PLAY_LAYOUT['screen_height'])))}" required></label>
+            </div>
+            <div class="field-row">
+              <label>Safe edge margin <input id="safe-margin" type="number" name="safe_margin" min="0" max="240" value="{html.escape(str(play_layout.get('safe_margin', DEFAULT_PLAY_LAYOUT['safe_margin'])))}" required></label>
+              <label>Max menu width <input id="content-width" type="number" name="content_width" min="320" max="10000" value="{html.escape(str(play_layout.get('content_width', DEFAULT_PLAY_LAYOUT['content_width'])))}" required></label>
+            </div>
+            <div class="field-row">
+              <label>Minimum game card width <input id="card-min-width" type="number" name="card_min_width" min="120" max="1200" value="{html.escape(str(play_layout.get('card_min_width', DEFAULT_PLAY_LAYOUT['card_min_width'])))}" required></label>
+              <label>Grid gap <input id="grid-gap" type="number" name="grid_gap" min="0" max="120" value="{html.escape(str(play_layout.get('grid_gap', DEFAULT_PLAY_LAYOUT['grid_gap'])))}" required></label>
+            </div>
+            <div class="field-row">
+              <label>Hero scale (%) <input id="hero-scale" type="number" name="hero_scale" min="50" max="160" value="{html.escape(str(play_layout.get('hero_scale', DEFAULT_PLAY_LAYOUT['hero_scale'])))}" required></label>
+              <label>Thumbnail shape <select name="thumbnail_ratio">{ratio_options}</select></label>
+            </div>
+            <div class="form-actions">
+              <button class="button secondary" type="button" id="detect-play-screen">Detect monitor from browser</button>
+              <button class="button secondary" type="button" id="fit-play-screen">Fit cards to monitor</button>
+            </div>
+            <p id="layout-estimate" class="layout-estimate">Estimated columns will update as you edit these values.</p>
+          </section>
+          <h2>Color palette</h2>
+          <label>Preset <select name="palette" id="palette-select">{palette_options}</select></label>
+          <div class="field-row color-fields">{color_fields}</div>
+          <div class="brand-preview card">
+            <div class="card-body">
+              <p class="eyebrow">Preview</p>
+              <h2>{html.escape(str(branding.get('install_name', 'Bitcade')))}</h2>
+              <p>{html.escape(str(branding.get('welcome_text', '')))}</p>
+              <a class="button" href="/play">View arcade menu</a>
+            </div>
+          </div>
+          <div class="form-actions">
+            <button class="button" type="submit">Save branding</button>
+            <a class="button secondary" href="/admin">Cancel</a>
+          </div>
+        </form>
+        <script>
+        (() => {{
+          const byId = (id) => document.getElementById(id);
+          const fields = ["screen-width", "screen-height", "safe-margin", "content-width", "card-min-width", "grid-gap", "hero-scale"].map(byId);
+          const summary = byId("layout-summary");
+          const estimate = byId("layout-estimate");
+          const numberValue = (field, fallback = 0) => Number.parseInt(field?.value || fallback, 10) || fallback;
+          const updateEstimate = () => {{
+            const width = numberValue(byId("screen-width"), {DEFAULT_DISPLAY_WIDTH});
+            const height = numberValue(byId("screen-height"), {DEFAULT_DISPLAY_HEIGHT});
+            const margin = numberValue(byId("safe-margin"), {DEFAULT_PLAY_LAYOUT['safe_margin']});
+            const content = Math.min(numberValue(byId("content-width"), width), Math.max(320, width - margin * 2));
+            const card = numberValue(byId("card-min-width"), {DEFAULT_PLAY_LAYOUT['card_min_width']});
+            const gap = numberValue(byId("grid-gap"), {DEFAULT_PLAY_LAYOUT['grid_gap']});
+            const columns = Math.max(1, Math.floor((content + gap) / (card + gap)));
+            if (summary) summary.textContent = `${{width}}×${{height}}`;
+            if (estimate) estimate.textContent = `Estimated layout: ${{columns}} game card${{columns === 1 ? "" : "s"}} per row inside a ${{content}}px menu area.`;
+          }};
+          fields.forEach((field) => field?.addEventListener("input", updateEstimate));
+          byId("detect-play-screen")?.addEventListener("click", () => {{
+            const width = Math.round(window.screen?.width || window.innerWidth);
+            const height = Math.round(window.screen?.height || window.innerHeight);
+            byId("screen-width").value = width;
+            byId("screen-height").value = height;
+            byId("content-width").value = Math.max(320, width - numberValue(byId("safe-margin"), {DEFAULT_PLAY_LAYOUT['safe_margin']}) * 2);
+            updateEstimate();
+          }});
+          byId("fit-play-screen")?.addEventListener("click", () => {{
+            const width = numberValue(byId("screen-width"), {DEFAULT_DISPLAY_WIDTH});
+            const height = numberValue(byId("screen-height"), {DEFAULT_DISPLAY_HEIGHT});
+            const landscape = width >= height;
+            byId("safe-margin").value = landscape ? 32 : 20;
+            byId("content-width").value = Math.max(320, width - numberValue(byId("safe-margin"), 32) * 2);
+            byId("card-min-width").value = landscape ? Math.max(220, Math.min(420, Math.round(width / 5))) : Math.max(180, Math.min(360, Math.round(width / 2.4)));
+            byId("grid-gap").value = landscape ? 20 : 14;
+            byId("hero-scale").value = landscape ? 100 : 82;
+            updateEstimate();
+          }});
+          updateEstimate();
+        }})();
+        </script>
+        """
+        return self.html_page("Branding Settings", body)
 
     def update_input_settings(self, form: dict[str, list[str]]) -> None:
         hold_seconds = float(first_form_value(form, "hold_seconds", "2"))
@@ -2956,7 +3397,7 @@ class BitcadeApp:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
         if row is None:
-            return html_page("Game not found", "<h1>Game not found</h1>")
+            return self.html_page("Game not found", "<h1>Game not found</h1>")
         game = self.rows_to_games([row])[0]
         metadata = read_metadata(self.games_dir / game_id)
         diagnostics_panel = self.render_import_diagnostics(metadata)
@@ -3021,7 +3462,7 @@ class BitcadeApp:
           </div>
         </form>
         """
-        return html_page("Edit Game", body)
+        return self.html_page("Edit Game", body)
 
     def render_import_diagnostics(self, metadata: dict[str, Any]) -> str:
         diagnostics = metadata.get("importDiagnostics")
@@ -3075,6 +3516,15 @@ class BitcadeApp:
         if game is None:
             return self.not_found(start_response)
         return self.serve_file(start_response, self.thumbnails_dir / safe_name)
+
+    def serve_branding_asset(self, start_response, filename: str):
+        safe_name = Path(safe_url_path(filename)).name
+        if Path(safe_name).suffix.lower() not in BRANDING_IMAGE_EXTENSIONS:
+            return self.not_found(start_response)
+        branding = self.branding()
+        if safe_name not in {branding.get("logo_path"), branding.get("mark_path")}:
+            return self.not_found(start_response)
+        return self.serve_file(start_response, self.branding_dir / safe_name)
 
     def serve_static(self, start_response, filename: str):
         return self.serve_file(start_response, STATIC_DIR / safe_url_path(filename))
