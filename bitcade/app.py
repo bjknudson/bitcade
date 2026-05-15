@@ -158,6 +158,23 @@ LAYOUT_OPTIONS = {
     "showcase": "Institution showcase with wider cards",
 }
 
+THUMBNAIL_RATIOS = {
+    "16 / 9": "16:9 widescreen",
+    "4 / 3": "4:3 classic monitor",
+    "1 / 1": "Square cards",
+}
+
+DEFAULT_PLAY_LAYOUT = {
+    "screen_width": DEFAULT_DISPLAY_WIDTH,
+    "screen_height": DEFAULT_DISPLAY_HEIGHT,
+    "safe_margin": 32,
+    "content_width": 1536,
+    "card_min_width": 288,
+    "grid_gap": 19,
+    "hero_scale": 100,
+    "thumbnail_ratio": "16 / 9",
+}
+
 DEFAULT_BRANDING = {
     "install_name": "Bitcade",
     "site_title": "Bitcade",
@@ -169,6 +186,7 @@ DEFAULT_BRANDING = {
     "layout": "arcade",
     "palette": "classic",
     "colors": COLOR_PALETTES["classic"],
+    "play_layout": DEFAULT_PLAY_LAYOUT,
 }
 
 DEFAULT_CABINET_PROFILE = {
@@ -477,6 +495,28 @@ def css_variable_block(branding: dict[str, Any] | None) -> str:
         value = str(colors.get(key, "")).strip()
         if re.fullmatch(r"#[0-9a-fA-F]{6}", value):
             declarations.append(f"{variable}: {value};")
+    play_layout = branding.get("play_layout", {}) if isinstance(branding.get("play_layout"), dict) else {}
+    pixel_variables = {
+        "safe_margin": "--play-safe-margin",
+        "content_width": "--play-max-width",
+        "card_min_width": "--play-card-min",
+        "grid_gap": "--play-grid-gap",
+    }
+    for key, variable in pixel_variables.items():
+        try:
+            value = int(play_layout.get(key, DEFAULT_PLAY_LAYOUT[key]))
+        except (TypeError, ValueError):
+            value = int(DEFAULT_PLAY_LAYOUT[key])
+        declarations.append(f"{variable}: {value}px;")
+    try:
+        hero_scale = int(play_layout.get("hero_scale", DEFAULT_PLAY_LAYOUT["hero_scale"])) / 100
+    except (TypeError, ValueError):
+        hero_scale = DEFAULT_PLAY_LAYOUT["hero_scale"] / 100
+    declarations.append(f"--play-hero-scale: {hero_scale:.2f};")
+    thumbnail_ratio = str(play_layout.get("thumbnail_ratio", DEFAULT_PLAY_LAYOUT["thumbnail_ratio"]))
+    if thumbnail_ratio not in THUMBNAIL_RATIOS:
+        thumbnail_ratio = DEFAULT_PLAY_LAYOUT["thumbnail_ratio"]
+    declarations.append(f"--play-thumbnail-ratio: {thumbnail_ratio};")
     if not declarations:
         return ""
     return f"<style>:root {{{' '.join(declarations)}}}</style>"
@@ -984,6 +1024,9 @@ class BitcadeApp:
             colors = stored.get("colors")
             if isinstance(colors, dict):
                 branding["colors"] = {**branding["colors"], **colors}
+            play_layout = stored.get("play_layout")
+            if isinstance(play_layout, dict):
+                branding["play_layout"] = {**branding["play_layout"], **play_layout}
         if branding.get("layout") not in LAYOUT_OPTIONS:
             branding["layout"] = "arcade"
         if branding.get("palette") not in COLOR_PALETTES:
@@ -2444,7 +2487,7 @@ class BitcadeApp:
             cards="".join(cards) or '<p class="empty">No approved games yet.</p>',
             code=self.current_screen_code(),
         )
-        return self.html_page("Play", body)
+        return self.html_page("Play", body, body_class="play-page")
 
     def render_game_info(self, start_response, game_id: str):
         with self.connect() as conn:
@@ -3081,6 +3124,39 @@ class BitcadeApp:
             raise ValueError("Branding colors must use six-digit hex values, such as #61f0c1.")
         return value.lower()
 
+    def normalize_layout_number(self, form: dict[str, list[str]], key: str, fallback: int, minimum: int, maximum: int) -> int:
+        try:
+            value = int(first_form_value(form, key, str(fallback)) or fallback)
+        except ValueError as error:
+            raise ValueError("Play-screen layout values must be whole numbers.") from error
+        if value < minimum or value > maximum:
+            raise ValueError(f"{key.replace('_', ' ').title()} must be between {minimum} and {maximum}.")
+        return value
+
+    def stored_layout_int(self, layout: dict[str, Any], key: str) -> int:
+        try:
+            return int(layout.get(key, DEFAULT_PLAY_LAYOUT[key]))
+        except (TypeError, ValueError):
+            return int(DEFAULT_PLAY_LAYOUT[key])
+
+    def normalize_play_layout_settings(self, form: dict[str, list[str]], current: dict[str, Any]) -> dict[str, Any]:
+        layout = current.get("play_layout", {}) if isinstance(current.get("play_layout"), dict) else {}
+        normalized = {
+            "screen_width": self.normalize_layout_number(form, "screen_width", self.stored_layout_int(layout, "screen_width"), 320, 10000),
+            "screen_height": self.normalize_layout_number(form, "screen_height", self.stored_layout_int(layout, "screen_height"), 240, 10000),
+            "safe_margin": self.normalize_layout_number(form, "safe_margin", self.stored_layout_int(layout, "safe_margin"), 0, 240),
+            "content_width": self.normalize_layout_number(form, "content_width", self.stored_layout_int(layout, "content_width"), 320, 10000),
+            "card_min_width": self.normalize_layout_number(form, "card_min_width", self.stored_layout_int(layout, "card_min_width"), 120, 1200),
+            "grid_gap": self.normalize_layout_number(form, "grid_gap", self.stored_layout_int(layout, "grid_gap"), 0, 120),
+            "hero_scale": self.normalize_layout_number(form, "hero_scale", self.stored_layout_int(layout, "hero_scale"), 50, 160),
+            "thumbnail_ratio": first_form_value(form, "thumbnail_ratio", str(layout.get("thumbnail_ratio", DEFAULT_PLAY_LAYOUT["thumbnail_ratio"]))).strip(),
+        }
+        if normalized["thumbnail_ratio"] not in THUMBNAIL_RATIOS:
+            raise ValueError("Unknown thumbnail ratio.")
+        if normalized["content_width"] > normalized["screen_width"]:
+            normalized["content_width"] = normalized["screen_width"]
+        return normalized
+
     def update_branding_settings(self, form: dict[str, list[str]], files: dict[str, dict[str, Any]]) -> None:
         current = self.branding()
         palette = first_form_value(form, "palette", "custom").strip() or "custom"
@@ -3105,6 +3181,7 @@ class BitcadeApp:
             "layout": layout,
             "palette": palette,
             "colors": colors,
+            "play_layout": self.normalize_play_layout_settings(form, current),
         }
         for slot, field in (("logo", "logo"), ("mark", "mark")):
             raw_upload = files.get(field)
@@ -3129,6 +3206,11 @@ class BitcadeApp:
         layout_options = "".join(
             f'<label class="option-card"><input type="radio" name="layout" value="{html.escape(key)}"{" checked" if key == branding.get("layout") else ""}><span><strong>{html.escape(key.title())}</strong>{html.escape(description)}</span></label>'
             for key, description in LAYOUT_OPTIONS.items()
+        )
+        play_layout = branding.get("play_layout", {}) if isinstance(branding.get("play_layout"), dict) else DEFAULT_PLAY_LAYOUT
+        ratio_options = "".join(
+            f'<option value="{html.escape(value)}"{" selected" if value == play_layout.get("thumbnail_ratio") else ""}>{html.escape(label)}</option>'
+            for value, label in THUMBNAIL_RATIOS.items()
         )
         color_fields = "".join(
             f'<label>{html.escape(label)} <input type="color" name="color_{key}" value="{html.escape(str(colors.get(key, COLOR_PALETTES["classic"][key])))}"></label>'
@@ -3170,6 +3252,36 @@ class BitcadeApp:
           </div>
           <h2>Layout</h2>
           <div class="layout-options">{layout_options}</div>
+          <section class="layout-tools" aria-labelledby="play-layout-tools">
+            <div class="section-heading">
+              <div>
+                <h2 id="play-layout-tools">Play-screen layout tools</h2>
+                <p>Tune the arcade menu for the attached monitor. Use Detect on that display, then adjust card size and spacing until the game grid fits comfortably.</p>
+              </div>
+              <p class="profile-size"><span id="layout-summary">{html.escape(str(play_layout.get('screen_width', DEFAULT_DISPLAY_WIDTH)))}×{html.escape(str(play_layout.get('screen_height', DEFAULT_DISPLAY_HEIGHT)))}</span></p>
+            </div>
+            <div class="field-row">
+              <label>Monitor width <input id="screen-width" type="number" name="screen_width" min="320" max="10000" value="{html.escape(str(play_layout.get('screen_width', DEFAULT_PLAY_LAYOUT['screen_width'])))}" required></label>
+              <label>Monitor height <input id="screen-height" type="number" name="screen_height" min="240" max="10000" value="{html.escape(str(play_layout.get('screen_height', DEFAULT_PLAY_LAYOUT['screen_height'])))}" required></label>
+            </div>
+            <div class="field-row">
+              <label>Safe edge margin <input id="safe-margin" type="number" name="safe_margin" min="0" max="240" value="{html.escape(str(play_layout.get('safe_margin', DEFAULT_PLAY_LAYOUT['safe_margin'])))}" required></label>
+              <label>Max menu width <input id="content-width" type="number" name="content_width" min="320" max="10000" value="{html.escape(str(play_layout.get('content_width', DEFAULT_PLAY_LAYOUT['content_width'])))}" required></label>
+            </div>
+            <div class="field-row">
+              <label>Minimum game card width <input id="card-min-width" type="number" name="card_min_width" min="120" max="1200" value="{html.escape(str(play_layout.get('card_min_width', DEFAULT_PLAY_LAYOUT['card_min_width'])))}" required></label>
+              <label>Grid gap <input id="grid-gap" type="number" name="grid_gap" min="0" max="120" value="{html.escape(str(play_layout.get('grid_gap', DEFAULT_PLAY_LAYOUT['grid_gap'])))}" required></label>
+            </div>
+            <div class="field-row">
+              <label>Hero scale (%) <input id="hero-scale" type="number" name="hero_scale" min="50" max="160" value="{html.escape(str(play_layout.get('hero_scale', DEFAULT_PLAY_LAYOUT['hero_scale'])))}" required></label>
+              <label>Thumbnail shape <select name="thumbnail_ratio">{ratio_options}</select></label>
+            </div>
+            <div class="form-actions">
+              <button class="button secondary" type="button" id="detect-play-screen">Detect monitor from browser</button>
+              <button class="button secondary" type="button" id="fit-play-screen">Fit cards to monitor</button>
+            </div>
+            <p id="layout-estimate" class="layout-estimate">Estimated columns will update as you edit these values.</p>
+          </section>
           <h2>Color palette</h2>
           <label>Preset <select name="palette" id="palette-select">{palette_options}</select></label>
           <div class="field-row color-fields">{color_fields}</div>
@@ -3186,6 +3298,47 @@ class BitcadeApp:
             <a class="button secondary" href="/admin">Cancel</a>
           </div>
         </form>
+        <script>
+        (() => {{
+          const byId = (id) => document.getElementById(id);
+          const fields = ["screen-width", "screen-height", "safe-margin", "content-width", "card-min-width", "grid-gap", "hero-scale"].map(byId);
+          const summary = byId("layout-summary");
+          const estimate = byId("layout-estimate");
+          const numberValue = (field, fallback = 0) => Number.parseInt(field?.value || fallback, 10) || fallback;
+          const updateEstimate = () => {{
+            const width = numberValue(byId("screen-width"), {DEFAULT_DISPLAY_WIDTH});
+            const height = numberValue(byId("screen-height"), {DEFAULT_DISPLAY_HEIGHT});
+            const margin = numberValue(byId("safe-margin"), {DEFAULT_PLAY_LAYOUT['safe_margin']});
+            const content = Math.min(numberValue(byId("content-width"), width), Math.max(320, width - margin * 2));
+            const card = numberValue(byId("card-min-width"), {DEFAULT_PLAY_LAYOUT['card_min_width']});
+            const gap = numberValue(byId("grid-gap"), {DEFAULT_PLAY_LAYOUT['grid_gap']});
+            const columns = Math.max(1, Math.floor((content + gap) / (card + gap)));
+            if (summary) summary.textContent = `${{width}}×${{height}}`;
+            if (estimate) estimate.textContent = `Estimated layout: ${{columns}} game card${{columns === 1 ? "" : "s"}} per row inside a ${{content}}px menu area.`;
+          }};
+          fields.forEach((field) => field?.addEventListener("input", updateEstimate));
+          byId("detect-play-screen")?.addEventListener("click", () => {{
+            const width = Math.round(window.screen?.width || window.innerWidth);
+            const height = Math.round(window.screen?.height || window.innerHeight);
+            byId("screen-width").value = width;
+            byId("screen-height").value = height;
+            byId("content-width").value = Math.max(320, width - numberValue(byId("safe-margin"), {DEFAULT_PLAY_LAYOUT['safe_margin']}) * 2);
+            updateEstimate();
+          }});
+          byId("fit-play-screen")?.addEventListener("click", () => {{
+            const width = numberValue(byId("screen-width"), {DEFAULT_DISPLAY_WIDTH});
+            const height = numberValue(byId("screen-height"), {DEFAULT_DISPLAY_HEIGHT});
+            const landscape = width >= height;
+            byId("safe-margin").value = landscape ? 32 : 20;
+            byId("content-width").value = Math.max(320, width - numberValue(byId("safe-margin"), 32) * 2);
+            byId("card-min-width").value = landscape ? Math.max(220, Math.min(420, Math.round(width / 5))) : Math.max(180, Math.min(360, Math.round(width / 2.4)));
+            byId("grid-gap").value = landscape ? 20 : 14;
+            byId("hero-scale").value = landscape ? 100 : 82;
+            updateEstimate();
+          }});
+          updateEstimate();
+        }})();
+        </script>
         """
         return self.html_page("Branding Settings", body)
 

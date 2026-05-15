@@ -236,6 +236,43 @@ class ReplitReactViteWebTests(unittest.TestCase):
         self.assertIn("Class code", rendered)
         self.assertIn("--bg: #001122", rendered)
         self.assertIn("layout-compact", rendered)
+        self.assertIn("play-page", rendered)
+        self.assertIn("--play-max-width: 1536px", rendered)
+
+    def test_branding_layout_tools_update_play_screen_variables(self) -> None:
+        form = {
+            "install_name": ["Bitcade"],
+            "site_title": ["Bitcade"],
+            "tagline": ["Choose a local game"],
+            "welcome_text": ["Welcome"],
+            "student_upload_label": ["Student upload code"],
+            "layout": ["showcase"],
+            "palette": ["classic"],
+            "color_background": ["#111426"],
+            "color_panel": ["#1c2140"],
+            "color_panel_2": ["#252b52"],
+            "color_text": ["#f8fbff"],
+            "color_muted": ["#b7c1d9"],
+            "color_accent": ["#61f0c1"],
+            "color_accent_2": ["#ffcf5a"],
+            "screen_width": ["2560"],
+            "screen_height": ["1440"],
+            "safe_margin": ["48"],
+            "content_width": ["2200"],
+            "card_min_width": ["360"],
+            "grid_gap": ["24"],
+            "hero_scale": ["90"],
+            "thumbnail_ratio": ["4 / 3"],
+        }
+
+        self.app.update_branding_settings(form, {})
+
+        rendered = self.app.render_play().decode("utf-8")
+        self.assertIn("layout-showcase", rendered)
+        self.assertIn("--play-max-width: 2200px", rendered)
+        self.assertIn("--play-card-min: 360px", rendered)
+        self.assertIn("--play-hero-scale: 0.90", rendered)
+        self.assertIn("--play-thumbnail-ratio: 4 / 3", rendered)
 
     def test_branding_logo_upload_is_served_when_selected(self) -> None:
         form = {
