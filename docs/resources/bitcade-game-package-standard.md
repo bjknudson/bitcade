@@ -6,7 +6,7 @@ This document defines the first Bitcade package contract. It is the agreement be
 
 A Bitcade browser game must run locally from an `index.html` file without internet access. A Python/Pygame game must run locally from a declared `.py` entry file on the Bitcade machine.
 
-The first supported Bitcade packages are static browser games. Phase 3 adds trusted Python/Pygame packages as a native local adapter. Processing, Java, native apps, and general Replit projects are future adapter targets, not current package types.
+The first supported Bitcade packages are static browser games. Phase 3 adds trusted Python/Pygame packages as a native local adapter. Bitcade also has a narrow admin importer for Replit React/Vite web workspaces that can be built into static browser files. Processing, Java, native apps, backend-dependent Replit projects, and other general Replit projects are future adapter targets, not current package types.
 
 ## 2. Package format
 
@@ -53,9 +53,12 @@ Students should export or wrap projects so the package can be opened from `index
 
 Some classroom tools export a playable browser game but do not include
 `bitcade.json`. Bitcade may provide format-specific admin importers for those
-cases. The first importer accepts p5.js editor zip downloads with root-level
-files such as `index.html`, `sketch.js`, `style.css`, `p5.js`, and
-`p5.sound.min.js`. Bitcade wraps that upload into an installed game folder,
+cases. The first importers accept p5.js editor zip downloads and offline
+Scratch HTML packages. p5.js editor zips usually contain root-level files such
+as `index.html`, `sketch.js`, `style.css`, `p5.js`, and `p5.sound.min.js`.
+Scratch uploads must already be packaged as offline HTML with `index.html`;
+raw `.sb3` projects are not directly playable because they do not include a
+browser player. Bitcade wraps supported imports into an installed game folder,
 creates draft metadata, and leaves the game pending until a teacher edits,
 previews, and approves it.
 
@@ -82,12 +85,13 @@ Supported platform values for the first version are:
 | `makecode-arcade` | MakeCode Arcade HTML export. |
 | `python-pygame` | Trusted local Python/Pygame project launched on the Bitcade machine. |
 
-Future adapters may add values such as `processing`, `replit-export`, or `godot-html5`.
+Future adapters may add values such as `processing`, broader `replit-export`, or `godot-html5`.
 
 Upload pages should link to a reference guide for each supported format as those
-guides become available. The first guide covers packaging p5.js games for local,
-offline Bitcade play. Each guide should also provide a downloadable template
-folder with required files and fill-in placeholders where practical.
+guides become available. The first guides cover packaging p5.js, Scratch, and
+Python/Pygame games for local, offline Bitcade play. Each guide should also
+provide a downloadable template folder with required files and fill-in
+placeholders where practical.
 
 ## 4. `bitcade.json` schema
 

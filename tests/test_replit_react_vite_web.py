@@ -243,6 +243,45 @@ class ReplitReactViteWebTests(unittest.TestCase):
         self.assertEqual(controls["player2"]["a"], "Shift")
         self.assertIn("clickable React menu", warnings[0])
 
+    def test_admin_upload_imports_offline_scratch_html_package(self) -> None:
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr(
+                "scratch-racer/index.html",
+                "<!doctype html><title>Scratch Racer</title><script>window.TurboWarp = { project: true };</script>",
+            )
+            archive.writestr("scratch-racer/project.js", "console.log('offline scratch package')")
+        buffer.seek(0)
+
+        game_id = self.app.install_uploaded_package(buffer, "Scratch Racer.zip")
+        metadata = json.loads((self.app.games_dir / game_id / "bitcade.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(metadata["platform"], "scratch")
+        self.assertEqual(metadata["entry"], "index.html")
+        self.assertEqual(metadata["display"]["width"], 480)
+
+    def test_raw_scratch_project_upload_has_specific_error(self) -> None:
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("project.json", '{"targets": []}')
+            archive.writestr("sprite.svg", "<svg></svg>")
+        buffer.seek(0)
+
+        with self.assertRaisesRegex(ValueError, "Raw Scratch .sb3 projects are not directly playable"):
+            self.app.install_uploaded_package(buffer, "Scratch Project.zip")
+
+    def test_scratch_html_import_rejects_internet_runtime_references(self) -> None:
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr(
+                "scratch-racer/index.html",
+                '<!doctype html><script src="https://example.com/scratch-player.js"></script><script>window.TurboWarp = true;</script>',
+            )
+        buffer.seek(0)
+
+        with self.assertRaisesRegex(ValueError, "references internet files"):
+            self.app.install_uploaded_package(buffer, "Scratch Racer.zip")
+
     def test_upload_multipart_parser_returns_package_stream(self) -> None:
         boundary = "bitcade-test-boundary"
         body = (

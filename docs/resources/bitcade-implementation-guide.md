@@ -94,7 +94,7 @@ Bitcade Device
 ├── Runtime Adapters
 │   ├── browser game adapter
 │   ├── Python/Pygame adapter
-│   ├── future Scratch adapter
+│   ├── Scratch HTML import adapter
 │   ├── future Processing adapter
 │   └── future custom adapters
 ├── Input Layer

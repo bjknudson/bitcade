@@ -38,6 +38,11 @@ FORMAT_GUIDES = {
         "template_path": REPO_ROOT / "docs" / "resources" / "upload-guides" / "templates" / "p5js-game-template",
         "template_filename": "bitcade-p5js-game-template.zip",
     },
+    "scratch": {
+        "title": "Scratch",
+        "summary": "Export a Scratch project to an offline HTML package that Bitcade can launch in Chromium.",
+        "doc_path": REPO_ROOT / "docs" / "resources" / "upload-guides" / "scratch.md",
+    },
     "python-pygame": {
         "title": "Python/Pygame",
         "summary": "Package a trusted local pygame project for launch on the Bitcade display.",
@@ -71,6 +76,7 @@ ALLOWED_PACKAGE_EXTENSIONS = {
     ".txt",
     ".md",
     ".py",
+    ".sb3",
     ".ttf",
     ".otf",
 }
@@ -1712,15 +1718,24 @@ class BitcadeApp:
                 metadata = self.build_student_metadata(student_form, detected)
                 if detected["platform"] == "p5js":
                     self.normalize_p5js_import(extracted_dir)
+                elif detected["platform"] == "scratch":
+                    self.validate_scratch_html_import(extracted_dir)
                 (extracted_dir / "bitcade.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
                 validate_metadata(metadata, extracted_dir)
             elif (extracted_dir / "bitcade.json").is_file():
                 metadata = read_metadata(extracted_dir)
-            else:
+            elif detected["platform"] == "p5js":
                 metadata = self.build_p5js_import_metadata(extracted_dir, upload_stem)
                 self.normalize_p5js_import(extracted_dir)
                 (extracted_dir / "bitcade.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
                 validate_metadata(metadata, extracted_dir)
+            elif detected["platform"] == "scratch":
+                self.validate_scratch_html_import(extracted_dir)
+                metadata = self.build_scratch_import_metadata(extracted_dir, upload_stem)
+                (extracted_dir / "bitcade.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+                validate_metadata(metadata, extracted_dir)
+            else:
+                raise ValueError("Package is missing bitcade.json and does not look like a supported importer format.")
             validate_package_files_for_platform(extracted_dir, metadata)
             self.prune_import_excluded_dirs(extracted_dir)
             game_id = self.available_game_id(slugify(str(metadata["title"])))
@@ -1769,7 +1784,7 @@ class BitcadeApp:
                 root_filenames = {PurePosixPath(path).name.lower() for path in package_members if len(PurePosixPath(path).parts) == 1}
                 is_replit_root_export = {"pnpm-workspace.yaml", "pnpm-lock.yaml"} <= root_filenames and "artifacts" in top_levels
                 if has_root_files and top_levels and "index.html" not in root_filenames and not is_replit_root_export:
-                    raise ValueError("Zip package cannot mix root-level files and top-level folders unless it is a p5.js editor export.")
+                    raise ValueError("Zip package cannot mix root-level files and top-level folders unless it is a supported editor export.")
                 if not has_root_files and len(top_levels) != 1:
                     raise ValueError("Zip package must contain exactly one top-level game folder.")
                 self.extract_zip_members(archive, temp_dir, package_members)
@@ -1789,7 +1804,13 @@ class BitcadeApp:
         if not game_dir.is_dir():
             raise ValueError("Zip package did not extract to a game folder.")
         self.prune_import_excluded_dirs(game_dir)
-        if not (game_dir / "bitcade.json").is_file() and not self.looks_like_p5js_export(game_dir) and not self.looks_like_replit_react_vite_web(game_dir):
+        if (
+            not (game_dir / "bitcade.json").is_file()
+            and not self.looks_like_p5js_export(game_dir)
+            and not self.looks_like_scratch_html_export(game_dir)
+            and not self.looks_like_raw_scratch_project(game_dir)
+            and not self.looks_like_replit_react_vite_web(game_dir)
+        ):
             if not allow_generated_metadata:
                 raise ValueError("Package is missing bitcade.json and does not look like a supported importer format.")
             self.detect_package_format(game_dir)
@@ -1833,6 +1854,13 @@ class BitcadeApp:
             platform = REPLIT_REACT_VITE_WEB_PLATFORM
         elif self.looks_like_p5js_export(game_dir):
             platform = "p5js"
+        elif self.looks_like_scratch_html_export(game_dir):
+            platform = "scratch"
+        elif self.looks_like_raw_scratch_project(game_dir):
+            raise ValueError(
+                "Raw Scratch .sb3 projects are not directly playable in Bitcade. "
+                "Export or package the Scratch project as an offline HTML file first, then upload that zip."
+            )
         elif python_files and not (game_dir / "index.html").is_file():
             platform = PYTHON_GAME_PLATFORM
         elif (game_dir / "index.html").is_file():
@@ -2409,6 +2437,94 @@ class BitcadeApp:
                 },
             },
         }
+
+    def looks_like_scratch_html_export(self, game_dir: Path) -> bool:
+        index_path = game_dir / "index.html"
+        if not index_path.is_file():
+            return False
+        filenames = {path.name.lower() for path in game_dir.rglob("*") if path.is_file()}
+        if any(name.endswith(".sb3") for name in filenames):
+            return True
+        index_text = index_path.read_text(encoding="utf-8", errors="ignore").lower()
+        scratch_markers = (
+            "turbowarp",
+            "forkphorus",
+            "scratch-vm",
+            "scratch-render",
+            "scratch-storage",
+            "project.json",
+            ".sb3",
+        )
+        return any(marker in index_text for marker in scratch_markers) or ("scratch" in index_text and "project" in index_text)
+
+    def looks_like_raw_scratch_project(self, game_dir: Path) -> bool:
+        files = [path for path in game_dir.rglob("*") if path.is_file()]
+        filenames = {path.name.lower() for path in files}
+        if any(name.endswith(".sb3") for name in filenames):
+            return True
+        if "project.json" not in filenames:
+            return False
+        return any(path.suffix.lower() in {".svg", ".png", ".jpg", ".jpeg", ".wav", ".mp3"} for path in files)
+
+    def build_scratch_import_metadata(self, game_dir: Path, upload_stem: str) -> dict[str, Any]:
+        if not (game_dir / "index.html").is_file():
+            raise ValueError("Scratch HTML export is missing index.html.")
+        title = upload_stem.replace("-", " ").strip().title() or "Imported Scratch Game"
+        return {
+            "title": title,
+            "authors": ["FILL IN: Student Name"],
+            "platform": "scratch",
+            "entry": "index.html",
+            "description": "FILL IN: Describe this Scratch game before approval.",
+            "license": "Classroom use only",
+            "credits": ["Imported from offline Scratch HTML export"],
+            "players": {
+                "min": 1,
+                "max": 1,
+                "simultaneous": False,
+            },
+            "input": {
+                "requiresKeyboard": True,
+                "requiresMouse": True,
+                "supportsGamepad": False,
+                "allowsSharedKeyboard": False,
+            },
+            "display": {
+                "width": 480,
+                "height": 360,
+                "scaling": "fit",
+                "speedModel": "delta-time",
+            },
+            "controls": {
+                "player1": {
+                    "up": "ArrowUp",
+                    "down": "ArrowDown",
+                    "left": "ArrowLeft",
+                    "right": "ArrowRight",
+                    "a": "Space",
+                    "b": "Shift",
+                    "start": "Enter",
+                },
+                "system": {
+                    "exit": "Escape",
+                    "menu": "Escape",
+                },
+            },
+        }
+
+    def validate_scratch_html_import(self, game_dir: Path) -> None:
+        index_path = game_dir / "index.html"
+        html_text = index_path.read_text(encoding="utf-8", errors="ignore")
+        external_refs = re.findall(
+            r'\b(?:src|href)=["\']((?:https?:)?//[^"\']+)["\']',
+            html_text,
+            flags=re.IGNORECASE,
+        )
+        if external_refs:
+            raise ValueError(
+                "Scratch HTML export references internet files that are not bundled locally: "
+                + ", ".join(sorted(set(external_refs)))
+            )
 
     def available_game_id(self, base_id: str) -> str:
         candidate = base_id
@@ -2992,7 +3108,7 @@ class BitcadeApp:
             {self.render_student_metadata_fields()}
             <button class="button" type="submit">Build JSON and submit</button>
           </form>
-          <p>Reference guides: <a href="/student/guides/p5js">p5.js</a> · <a href="/student/guides/python-pygame">Python/Pygame</a> · <a href="/student/guides">All formats</a></p>
+          <p>Reference guides: <a href="/student/guides/p5js">p5.js</a> · <a href="/student/guides/scratch">Scratch</a> · <a href="/student/guides/python-pygame">Python/Pygame</a> · <a href="/student/guides">All formats</a></p>
         </section>
         """
         return self.html_page("Student Upload", body)
@@ -3043,7 +3159,7 @@ class BitcadeApp:
         {alert}
         <section class="panel">
           <h2>Upload package</h2>
-          <p>Reference guides: <a href="/admin/guides/p5js">p5.js</a> · <a href="/admin/guides">All formats</a></p>
+          <p>Reference guides: <a href="/admin/guides/p5js">p5.js</a> · <a href="/admin/guides/scratch">Scratch</a> · <a href="/admin/guides">All formats</a></p>
           <form class="form-grid upload-form" action="/admin/upload" method="post" enctype="multipart/form-data">
             <label>Zip package <input type="file" name="package" accept=".zip" required></label>
             <label>Thumbnail <input type="file" name="thumbnail" accept="image/png,image/jpeg,image/gif,image/webp"></label>

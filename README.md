@@ -55,3 +55,26 @@ The project direction and first implementation contract live in [`docs/resources
 ## First-build rule
 
 To appear in Bitcade, a game must run from an `index.html` file without internet access.
+
+## Replit React/Vite exports
+
+Bitcade can import a Replit React/Vite web workspace from the admin upload page. Use the Replit zip when it still has the workspace files Bitcade needs to build it:
+
+- `pnpm-workspace.yaml`
+- `pnpm-lock.yaml`
+- `artifacts/<game-artifact>/package.json`
+- `artifacts/<game-artifact>/index.html`
+- `artifacts/<game-artifact>/vite.config.ts` or `.js`
+- `artifacts/<game-artifact>/src/`
+- optional `artifacts/<game-artifact>/.replit-artifact/artifact.toml`
+- any workspace libraries referenced by the artifact, such as `lib/`
+
+Remove bulky or private workspace baggage before upload:
+
+```bash
+scripts/clean-replit-zip.py Goal-Defender.zip Goal-Defender-bitcade.zip
+```
+
+The cleaner removes `.git`, `.agents`, `.local`, `node_modules`, `.DS_Store`, and similar export noise while keeping the Replit workspace shape. Upload the cleaned zip from `/admin`, not `/student`; Replit workspace imports run `pnpm install` and `pnpm build`, so they require teacher/admin review. The Raspberry Pi installer installs Node, npm, and pnpm for this importer, but the Pi must have network access during import unless dependencies are already cached.
+
+For restricted classroom networks, prefer building Replit/Vite games before upload. Run `npm install` and `npm run build` or the Replit workspace `pnpm` build on a machine with internet access, then package the generated static output with `bitcade.json`. A built static package can be uploaded through the normal Bitcade flow without downloading npm dependencies on the Pi.

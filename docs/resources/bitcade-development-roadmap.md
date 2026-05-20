@@ -116,6 +116,7 @@ Add:
 - Preview before submission.
 - Project checklist.
 - Export guides for p5.js, Scratch, and MakeCode.
+- Scratch offline HTML importer.
 
 Outcome: students can package and submit games with clearer feedback while teachers retain approval control.
 
@@ -123,7 +124,7 @@ Outcome: students can package and submit games with clearer feedback while teach
 
 Add future adapters only after the browser and Python/Pygame workflows are stable:
 
-- Scratch/TurboWarp adapter.
+- Broader Scratch/TurboWarp support, such as direct `.sb3` conversion if Bitcade bundles a local player.
 - Processing adapter.
 - Replit-export adapter.
 - Possible Godot HTML5 adapter.
