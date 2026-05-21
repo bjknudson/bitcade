@@ -117,6 +117,7 @@ KEY_OPTIONS = (
     "Slash",
     "Period",
 )
+BINDING_PATTERN = re.compile(r"^(button:\d+|axis:\d+:[+-])$")
 
 COLOR_PALETTES = {
     "classic": {
@@ -1297,6 +1298,10 @@ class BitcadeApp:
                     first_form_value(query, "preview"),
                 ),
             )
+        if path == "/student/code":
+            if not self.is_local_request(environ):
+                return self.response(start_response, "403 Forbidden", b"Upload code is only available on the Bitcade host display.", "text/plain; charset=utf-8")
+            return self.response(start_response, "200 OK", self.render_local_student_code())
         if path == "/student/guides":
             return self.response(start_response, "200 OK", self.render_upload_guides(base_path="/student/guides", back_link="/student"))
         if path.startswith("/student/guides/") and path.endswith("/template.zip"):
@@ -1428,6 +1433,10 @@ class BitcadeApp:
         window = int(time() // 120) + offset
         digest = sha256(f"{self.secret_key}:{window}".encode("utf-8")).hexdigest()
         return f"{int(digest[:10], 16) % 1_000_000:06d}"
+
+    def is_local_request(self, environ) -> bool:
+        remote = str(environ.get("REMOTE_ADDR", "")).strip()
+        return remote in {"127.0.0.1", "::1", "localhost"}
 
     def require_screen_code(self, submitted: str) -> None:
         submitted = submitted.strip()
@@ -2678,7 +2687,6 @@ class BitcadeApp:
           <p class="eyebrow">{install_name}</p>
           <h1>{tagline}</h1>
           <p>{welcome_text}</p>
-          <p class="screen-code">{upload_label} <strong>{code}</strong></p>
         </section>
         <section class="grid" aria-label="Approved games">{cards}</section>
         </div>
@@ -2687,11 +2695,28 @@ class BitcadeApp:
             install_name=html.escape(str(branding.get("install_name") or "Bitcade")),
             tagline=html.escape(str(branding.get("tagline") or "Choose a local game")),
             welcome_text=html.escape(str(branding.get("welcome_text") or "")),
-            upload_label=html.escape(str(branding.get("student_upload_label") or "Student upload code")),
             cards="".join(cards) or '<p class="empty">No approved games yet.</p>',
-            code=self.current_screen_code(),
         )
         return self.html_page("Play", body, body_class="play-page")
+
+    def render_local_student_code(self) -> bytes:
+        branding = self.branding()
+        upload_label = html.escape(str(branding.get("student_upload_label") or "Student upload code"))
+        code = self.current_screen_code()
+        body = f"""
+        <section class="hero compact">
+          <p class="eyebrow">Local host only</p>
+          <h1>{upload_label}</h1>
+          <p>Share this one-time code with the student device that is uploading.</p>
+          <p class="screen-code"><strong>{code}</strong></p>
+          <p>This page is only available from the Bitcade machine itself.</p>
+        </section>
+        <div class="form-actions">
+          <a class="button secondary" href="/student">Back to student upload</a>
+          <a class="button secondary" href="/play">Back to play menu</a>
+        </div>
+        """
+        return self.html_page("Student Upload Code", body)
 
     def render_game_info(self, start_response, game_id: str):
         with self.connect() as conn:
@@ -3097,7 +3122,8 @@ class BitcadeApp:
         {self.render_submission_checklist()}
         <section class="panel">
           <h2>Upload package</h2>
-          <p>Enter the upload code shown on the Bitcade screen, then choose your `.zip` package.</p>
+          <p>Enter the upload code shown on the Bitcade host display, then choose your `.zip` package.</p>
+          <p>On the Bitcade machine, open <a href="/student/code"><code>/student/code</code></a> to display the current upload code.</p>
           <form class="edit-form" action="/student/upload" method="post" enctype="multipart/form-data">
             <div class="field-row">
               <label>Upload code <input name="screen_code" inputmode="numeric" pattern="[0-9]{{6}}" maxlength="6" required></label>
@@ -3685,14 +3711,39 @@ class BitcadeApp:
         hold_seconds = float(first_form_value(form, "hold_seconds", "2"))
         if hold_seconds < 0.5 or hold_seconds > 10:
             raise ValueError("Hold seconds must be between 0.5 and 10.")
+        def validate_binding(value: str, label: str) -> str:
+            binding = value.strip()
+            if not binding:
+                return ""
+            if not BINDING_PATTERN.fullmatch(binding):
+                raise ValueError(f"{label} must use button:N or axis:N:+/- bindings.")
+            return binding
+
+        def validate_combo(value: str, label: str) -> str:
+            combo = value.strip()
+            if not combo:
+                return ""
+            parts = [part.strip() for part in combo.split("+") if part.strip()]
+            if not parts:
+                return ""
+            for index, part in enumerate(parts, start=1):
+                validate_binding(part, f"{label} part {index}")
+            return "+".join(parts)
+
         profile = {
             "name": first_form_value(form, "profile_name", "Default gamepad").strip() or "Default gamepad",
             "players": {
-                "1": {control: first_form_value(form, f"p1_{control}").strip() for control in VIRTUAL_CONTROLS},
-                "2": {control: first_form_value(form, f"p2_{control}").strip() for control in VIRTUAL_CONTROLS},
+                "1": {
+                    control: validate_binding(first_form_value(form, f"p1_{control}"), f"Player 1 {control}")
+                    for control in VIRTUAL_CONTROLS
+                },
+                "2": {
+                    control: validate_binding(first_form_value(form, f"p2_{control}"), f"Player 2 {control}")
+                    for control in VIRTUAL_CONTROLS
+                },
             },
             "system": {
-                "menuCombo": first_form_value(form, "menu_combo", "button:8+button:9").strip(),
+                "menuCombo": validate_combo(first_form_value(form, "menu_combo", "button:8+button:9"), "Menu combo"),
                 "holdSeconds": hold_seconds,
             },
         }
