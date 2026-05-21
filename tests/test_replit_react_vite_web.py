@@ -25,6 +25,15 @@ class ReplitReactViteWebTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    def start_response_capture(self) -> tuple[dict[str, object], object]:
+        captured: dict[str, object] = {}
+
+        def start_response(status: str, headers: list[tuple[str, str]]) -> None:
+            captured["status"] = status
+            captured["headers"] = headers
+
+        return captured, start_response
+
     def test_key_event_init_includes_legacy_key_code_fields(self) -> None:
         self.assertEqual(
             key_event_init("ArrowLeft"),
@@ -282,6 +291,194 @@ class ReplitReactViteWebTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "references internet files"):
             self.app.install_uploaded_package(buffer, "Scratch Racer.zip")
 
+    def test_student_upload_rejects_python_pygame_packages(self) -> None:
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("student-game/main.py", "print('hello')")
+        buffer.seek(0)
+
+        with self.assertRaisesRegex(ValueError, "admin upload"):
+            self.app.install_uploaded_package(buffer, "Student Game.zip", student_form={})
+
+    def test_student_p5js_upload_allows_blank_metadata_fields(self) -> None:
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("index.html", '<!doctype html><script src="libraries/p5.min.js"></script><script src="sketch.js"></script>')
+            archive.writestr("sketch.js", "function setup() { createCanvas(400, 300); }")
+            archive.writestr("libraries/p5.min.js", "window.p5 = function() {};")
+        buffer.seek(0)
+
+        game_id = self.app.install_uploaded_package(
+            buffer,
+            "Blank Fields.zip",
+            student_form={
+                "title": "",
+                "authors": "",
+                "description": "",
+                "license": "",
+                "credits": "",
+                "display_width": "",
+                "display_height": "not-a-number",
+            },
+        )
+
+        metadata = json.loads((self.app.games_dir / game_id / "bitcade.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["title"], "Blank Fields")
+        self.assertEqual(metadata["authors"], ["empty"])
+        self.assertEqual(metadata["description"], "empty")
+        self.assertEqual(metadata["credits"], ["empty"])
+        self.assertEqual(metadata["display"]["width"], 1900)
+        self.assertEqual(metadata["display"]["height"], 1080)
+
+    def test_student_metadata_fields_are_optional_in_form(self) -> None:
+        rendered = self.app.render_student_upload().decode("utf-8")
+
+        self.assertIn('name="title" placeholder="Uses package name if blank"', rendered)
+        self.assertNotIn('name="authors" required', rendered)
+        self.assertNotIn('name="description" required', rendered)
+        self.assertNotIn('name="display_width" min="1" value="1900" required', rendered)
+
+    def test_upload_code_page_has_refresh_controls(self) -> None:
+        rendered = self.app.render_local_student_code().decode("utf-8")
+
+        self.assertIn('href="/student/code">Refresh</a>', rendered)
+        self.assertIn("window.location.reload()", rendered)
+
+    def test_upload_multipart_can_validate_screen_code_before_large_package(self) -> None:
+        boundary = "bitcade-test-boundary"
+        payload = b"PK\x03\x04" + (b"x" * 1_000_000)
+        body = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="screen_code"\r\n\r\n'
+            "000000\r\n"
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="package"; filename="Goal-Defender.zip"\r\n'
+            "Content-Type: application/zip\r\n\r\n"
+        ).encode("utf-8") + payload + (
+            f"\r\n--{boundary}--\r\n"
+        ).encode("utf-8")
+        stream = BytesIO(body)
+        environ = {
+            "REQUEST_METHOD": "POST",
+            "CONTENT_TYPE": f"multipart/form-data; boundary={boundary}",
+            "CONTENT_LENGTH": str(len(body)),
+            "wsgi.input": stream,
+        }
+
+        with self.assertRaisesRegex(ValueError, "expired"):
+            self.app.parse_upload_multipart(environ, field_validator=lambda name, value: self.app.require_screen_code(value) if name == "screen_code" else None)
+
+        self.assertLess(stream.tell(), len(body))
+
+    def test_public_game_files_only_serve_approved_games(self) -> None:
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr(
+                "scratch-racer/index.html",
+                "<!doctype html><script>window.TurboWarp = { project: true };</script>",
+            )
+        buffer.seek(0)
+        game_id = self.app.install_uploaded_package(buffer, "Scratch Racer.zip")
+
+        captured, start_response = self.start_response_capture()
+        self.app.serve_game_file(start_response, f"{game_id}/index.html")
+        self.assertEqual(captured["status"], "404 Not Found")
+
+        captured, start_response = self.start_response_capture()
+        body = b"".join(self.app.preview_game(start_response, game_id)).decode("utf-8")
+        self.assertEqual(captured["status"], "200 OK")
+        self.assertIn(f"/admin/game-files/{game_id}/index.html", body)
+
+        self.app.update_game_status(game_id, "approved")
+        captured, start_response = self.start_response_capture()
+        body = b"".join(self.app.serve_game_file(start_response, f"{game_id}/index.html")).decode("utf-8")
+        self.assertEqual(captured["status"], "200 OK")
+        self.assertIn("TurboWarp", body)
+
+    def test_student_preview_requires_token_for_page_and_files(self) -> None:
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr(
+                "scratch-racer/index.html",
+                "<!doctype html><script>window.TurboWarp = { project: true };</script>",
+            )
+        buffer.seek(0)
+        game_id = self.app.install_uploaded_package(buffer, "Scratch Racer.zip")
+        with self.app.connect() as conn:
+            game = conn.execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
+        token = self.app.student_preview_token(game_id, str(game["uploaded_at"]))
+
+        captured, start_response = self.start_response_capture()
+        self.app.preview_student_game(start_response, game_id, "bad-token")
+        self.assertEqual(captured["status"], "404 Not Found")
+
+        captured, start_response = self.start_response_capture()
+        body = b"".join(self.app.preview_student_game(start_response, game_id, token)).decode("utf-8")
+        self.assertEqual(captured["status"], "200 OK")
+        self.assertIn(f"/student/game-files/{game_id}/index.html?token={token}", body)
+
+        captured, start_response = self.start_response_capture()
+        self.app.serve_student_game_file(start_response, f"{game_id}/index.html", "bad-token")
+        self.assertEqual(captured["status"], "404 Not Found")
+
+        captured, start_response = self.start_response_capture()
+        body = b"".join(self.app.serve_student_game_file(start_response, f"{game_id}/index.html", token)).decode("utf-8")
+        self.assertEqual(captured["status"], "200 OK")
+        self.assertIn("TurboWarp", body)
+
+    def test_delete_game_removes_record_folder_thumbnail_and_related_rows(self) -> None:
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr(
+                "scratch-racer/index.html",
+                "<!doctype html><script>window.TurboWarp = { project: true };</script>",
+            )
+            archive.writestr("scratch-racer/project.js", "console.log('offline scratch package')")
+            archive.writestr("scratch-racer/thumbnail.png", b"png-bytes")
+        buffer.seek(0)
+        game_id = self.app.install_uploaded_package(buffer, "Scratch Racer.zip")
+        game_dir = self.app.games_dir / game_id
+        thumbnail = self.app.thumbnails_dir / f"{game_id}.png"
+        with self.app.connect() as conn:
+            conn.execute("INSERT INTO play_sessions (game_id, started_at) VALUES (?, ?)", (game_id, "2026-05-21T00:00:00+00:00"))
+            self.assertGreater(conn.execute("SELECT COUNT(*) FROM files WHERE game_id = ?", (game_id,)).fetchone()[0], 0)
+
+        self.app.delete_game(game_id)
+
+        self.assertFalse(game_dir.exists())
+        self.assertFalse(thumbnail.exists())
+        with self.app.connect() as conn:
+            self.assertIsNone(conn.execute("SELECT 1 FROM games WHERE id = ?", (game_id,)).fetchone())
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM files WHERE game_id = ?", (game_id,)).fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM play_sessions WHERE game_id = ?", (game_id,)).fetchone()[0], 0)
+
+    def test_admin_list_includes_delete_action(self) -> None:
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr(
+                "scratch-racer/index.html",
+                "<!doctype html><script>window.TurboWarp = { project: true };</script>",
+            )
+        buffer.seek(0)
+        game_id = self.app.install_uploaded_package(buffer, "Scratch Racer.zip")
+
+        rendered = self.app.render_admin().decode("utf-8")
+
+        self.assertIn(f'action="/admin/games/{game_id}/delete"', rendered)
+        self.assertIn("Delete this game and its local files?", rendered)
+
+    def test_gamepad_menu_combo_accepts_positive_axis_binding(self) -> None:
+        form = {
+            "profile_name": ["Default gamepad"],
+            "hold_seconds": ["2"],
+            "menu_combo": ["axis:0:++button:9"],
+        }
+
+        self.app.update_input_settings(form)
+
+        profile = self.app.cabinet_profile()
+        self.assertEqual(profile["system"]["menuCombo"], "axis:0:++button:9")
+
     def test_upload_multipart_parser_returns_package_stream(self) -> None:
         boundary = "bitcade-test-boundary"
         body = (
@@ -358,7 +555,9 @@ class ReplitReactViteWebTests(unittest.TestCase):
         rendered = self.app.render_play().decode("utf-8")
         self.assertIn("Lincoln Arcade", rendered)
         self.assertIn("Play student projects", rendered)
-        self.assertIn("Class code", rendered)
+        self.assertNotIn("Class code", rendered)
+        code_page = self.app.render_local_student_code().decode("utf-8")
+        self.assertIn("Class code", code_page)
         self.assertIn("--bg: #001122", rendered)
         self.assertIn("layout-compact", rendered)
         self.assertIn("play-page", rendered)

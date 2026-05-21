@@ -118,6 +118,7 @@ KEY_OPTIONS = (
     "Period",
 )
 BINDING_PATTERN = re.compile(r"^(button:\d+|axis:\d+:[+-])$")
+BINDING_TOKEN_PATTERN = re.compile(r"(button:\d+|axis:\d+:[+-])")
 
 COLOR_PALETTES = {
     "classic": {
@@ -1296,6 +1297,7 @@ class BitcadeApp:
                     first_form_value(query, "message"),
                     first_form_value(query, "level", "info"),
                     first_form_value(query, "preview"),
+                    first_form_value(query, "token"),
                 ),
             )
         if path == "/student/code":
@@ -1312,7 +1314,11 @@ class BitcadeApp:
             return self.response(start_response, "200 OK", self.render_upload_guide(guide_id, base_path="/student/guides", back_link="/student"))
         if path.startswith("/student/games/") and path.endswith("/preview"):
             game_id = safe_url_path(path.removeprefix("/student/games/").removesuffix("/preview"))
-            return self.preview_student_game(start_response, game_id)
+            query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+            return self.preview_student_game(start_response, game_id, first_form_value(query, "token"))
+        if path.startswith("/student/game-files/"):
+            query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+            return self.serve_student_game_file(start_response, path.removeprefix("/student/game-files/"), first_form_value(query, "token"))
         if path.startswith("/game-files/"):
             return self.serve_game_file(start_response, path.removeprefix("/game-files/"))
         if path.startswith("/thumbnails/"):
@@ -1328,6 +1334,8 @@ class BitcadeApp:
             auth_response = self.require_admin(environ, start_response)
             if auth_response is not None:
                 return auth_response
+        if path.startswith("/admin/game-files/"):
+            return self.serve_game_file(start_response, path.removeprefix("/admin/game-files/"), allowed_statuses=None)
         if path == "/admin/logout":
             return self.redirect(start_response, "/admin/login", [("Set-Cookie", self.clear_session_cookie())])
         if path == "/admin/change-password":
@@ -1396,6 +1404,10 @@ class BitcadeApp:
                 form = self.parse_urlencoded(environ)
                 self.update_game_status(game_id, first_form_value(form, "status"))
                 return self.redirect_admin(start_response, "Game status updated.")
+            if path.startswith("/admin/games/") and path.endswith("/delete"):
+                game_id = safe_url_path(path.removeprefix("/admin/games/").removesuffix("/delete"))
+                self.delete_game(game_id)
+                return self.redirect_admin(start_response, "Game deleted.")
             if path.startswith("/admin/games/") and path.endswith("/edit"):
                 game_id = safe_url_path(path.removeprefix("/admin/games/").removesuffix("/edit"))
                 content_type = environ.get("CONTENT_TYPE", "")
@@ -1421,6 +1433,13 @@ class BitcadeApp:
             if path == "/student/upload":
                 return self.redirect(start_response, f"/student?message={quote(str(error))}&level=error")
             return self.redirect_admin(start_response, str(error), "error")
+        except Exception as error:
+            print(f"Bitcade unexpected request error on {path}: {error}", file=sys.stderr, flush=True)
+            if path == "/student/upload":
+                return self.redirect(start_response, "/student?message=Upload%20failed.%20Check%20that%20the%20zip%20is%20a%20valid%20Bitcade%20package%20and%20try%20again.&level=error")
+            if path == "/admin/upload":
+                return self.redirect_admin(start_response, "Upload failed. Check that the zip is a valid Bitcade package and try again.", "error")
+            return self.redirect_admin(start_response, "Request failed. Check the Bitcade logs for details.", "error")
 
     def parse_urlencoded(self, environ) -> dict[str, list[str]]:
         length = int(environ.get("CONTENT_LENGTH") or 0)
@@ -1443,6 +1462,19 @@ class BitcadeApp:
         valid_codes = {self.current_screen_code(), self.current_screen_code(-1)}
         if submitted not in valid_codes:
             raise ValueError("The screen code is missing or expired.")
+
+    def student_preview_token(self, game_id: str, uploaded_at: str) -> str:
+        digest = hmac.new(
+            self.secret_key.encode("utf-8"),
+            f"student-preview|{game_id}|{uploaded_at}".encode("utf-8"),
+            sha256,
+        ).hexdigest()
+        return digest[:32]
+
+    def require_student_preview_token(self, game: sqlite3.Row | dict[str, Any], submitted: str) -> None:
+        expected = self.student_preview_token(str(game["id"]), str(game["uploaded_at"]))
+        if not hmac.compare_digest(submitted.strip(), expected):
+            raise ValueError("Student preview link is missing or invalid.")
 
     def handle_login(self, environ, start_response):
         form = self.parse_urlencoded(environ)
@@ -1478,9 +1510,14 @@ class BitcadeApp:
 
     def handle_student_upload(self, environ, start_response):
         game_id = self.receive_uploaded_package(environ, require_code=True)
+        with self.connect() as conn:
+            game = conn.execute("SELECT uploaded_at FROM games WHERE id = ?", (game_id,)).fetchone()
+        if game is None:
+            raise ValueError("Uploaded game was not saved.")
+        preview_token = self.student_preview_token(game_id, str(game["uploaded_at"]))
         return self.redirect(
             start_response,
-            f"/student?message={quote(f'Submitted {game_id} for teacher approval.')}&level=info&preview={quote(game_id)}",
+            f"/student?message={quote(f'Submitted {game_id} for teacher approval.')}&level=info&preview={quote(game_id)}&token={quote(preview_token)}",
         )
 
     def receive_uploaded_package(self, environ, *, require_code: bool = False) -> str:
@@ -1489,7 +1526,13 @@ class BitcadeApp:
             raise ValueError("Choose a zip package to upload.")
         if content_length > self.max_upload_bytes:
             raise ValueError(f"Upload exceeds the {self.max_upload_bytes // (1024 * 1024)} MB limit.")
-        fields, files = self.parse_upload_multipart(environ)
+        field_validator = None
+        if require_code:
+            def field_validator(name: str, value: str) -> None:
+                if name == "screen_code":
+                    self.require_screen_code(value)
+
+        fields, files = self.parse_upload_multipart(environ, field_validator=field_validator)
         student_form = None
         if require_code:
             self.require_screen_code(fields.get("screen_code", ""))
@@ -1510,7 +1553,7 @@ class BitcadeApp:
         game_id = self.install_uploaded_package(package_file, filename, self.read_optional_upload(files.get("thumbnail")), student_form=student_form)
         return game_id
 
-    def parse_upload_multipart(self, environ) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
+    def parse_upload_multipart(self, environ, field_validator=None) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
         content_type = environ.get("CONTENT_TYPE", "")
         match = re.search(r'boundary="?([^";]+)"?', content_type)
         if not content_type.lower().startswith("multipart/form-data") or not match:
@@ -1611,7 +1654,10 @@ class BitcadeApp:
             else:
                 field_buffer = BytesIO()
                 boundary_line = read_part(field_buffer)
-                fields[name] = field_buffer.getvalue().decode("utf-8", errors="replace")
+                value = field_buffer.getvalue().decode("utf-8", errors="replace")
+                fields[name] = value
+                if field_validator is not None:
+                    field_validator(name, value)
             if boundary_line == "final":
                 return fields, files
 
@@ -1724,7 +1770,9 @@ class BitcadeApp:
                     raise ValueError("Replit React/Vite workspace imports must be reviewed by an admin upload.")
                 metadata = self.install_replit_react_vite_web_import(extracted_dir, filename)
             elif student_form is not None:
-                metadata = self.build_student_metadata(student_form, detected)
+                if detected["platform"] == PYTHON_GAME_PLATFORM:
+                    raise ValueError("Python/Pygame packages must be reviewed through an admin upload.")
+                metadata = self.build_student_metadata(student_form, detected, upload_stem)
                 if detected["platform"] == "p5js":
                     self.normalize_p5js_import(extracted_dir)
                 elif detected["platform"] == "scratch":
@@ -2265,36 +2313,33 @@ class BitcadeApp:
             if path.is_dir() and path.name.lower() in EXCLUDED_IMPORT_DIR_NAMES:
                 shutil.rmtree(path)
 
-    def build_student_metadata(self, form: dict[str, str], detected: dict[str, str]) -> dict[str, Any]:
-        title = form.get("title", "").strip()
-        authors = json_list_from_text(form.get("authors", ""))
-        description = form.get("description", "").strip()
+    def build_student_metadata(self, form: dict[str, str], detected: dict[str, str], upload_stem: str = "student-game") -> dict[str, Any]:
+        title = form.get("title", "").strip() or upload_stem.replace("-", " ").strip().title() or "Untitled Student Game"
+        authors = json_list_from_text(form.get("authors", "")) or ["empty"]
+        description = form.get("description", "").strip() or "empty"
         license_text = form.get("license", "").strip() or "Classroom use only"
-        credits = json_list_from_text(form.get("credits", ""))
-        if not title:
-            raise ValueError("Game title is required.")
-        if not authors:
-            raise ValueError("At least one author is required.")
-        if not description:
-            raise ValueError("Game description is required.")
-        if not credits:
-            credits = [f"Game by {', '.join(authors)}"]
+        credits = json_list_from_text(form.get("credits", "")) or ["empty"]
 
-        min_players = int(form.get("min_players", "1") or "1")
-        max_players = int(form.get("max_players", "1") or "1")
-        if min_players < 1 or max_players < min_players:
-            raise ValueError("Invalid player count.")
+        def positive_int(value: str, default: int) -> int:
+            try:
+                parsed = int(value or default)
+            except (TypeError, ValueError):
+                return default
+            return parsed if parsed > 0 else default
 
-        display_width = int(form.get("display_width", str(DEFAULT_DISPLAY_WIDTH)) or DEFAULT_DISPLAY_WIDTH)
-        display_height = int(form.get("display_height", str(DEFAULT_DISPLAY_HEIGHT)) or DEFAULT_DISPLAY_HEIGHT)
+        min_players = positive_int(form.get("min_players", "1"), 1)
+        max_players = positive_int(form.get("max_players", "1"), min_players)
+        if max_players < min_players:
+            max_players = min_players
+
+        display_width = positive_int(form.get("display_width", str(DEFAULT_DISPLAY_WIDTH)), DEFAULT_DISPLAY_WIDTH)
+        display_height = positive_int(form.get("display_height", str(DEFAULT_DISPLAY_HEIGHT)), DEFAULT_DISPLAY_HEIGHT)
         display_scaling = form.get("display_scaling", "fit").strip() or "fit"
         speed_model = form.get("speed_model", "delta-time").strip() or "delta-time"
-        if display_width <= 0 or display_height <= 0:
-            raise ValueError("Display width and height must be positive.")
         if display_scaling not in DISPLAY_SCALING_MODES:
-            raise ValueError("Unsupported display scaling.")
+            display_scaling = "fit"
         if speed_model not in SPEED_MODELS:
-            raise ValueError("Unsupported speed model.")
+            speed_model = "delta-time"
 
         def key(name: str, default: str) -> str:
             value = form.get(name, "").strip()
@@ -2554,6 +2599,41 @@ class BitcadeApp:
             approved_at = utc_now() if status == "approved" else None
             conn.execute("UPDATE games SET status = ?, approved_at = ? WHERE id = ?", (status, approved_at, game_id))
 
+    def delete_game(self, game_id: str) -> None:
+        safe_game_id = safe_package_path(game_id)
+        with self.connect() as conn:
+            game = conn.execute("SELECT thumbnail_path FROM games WHERE id = ?", (safe_game_id,)).fetchone()
+            if game is None:
+                raise ValueError("Game not found.")
+
+            running = self.running_native_games.pop(safe_game_id, None)
+            if running is not None and running.poll() is None:
+                running.terminate()
+                try:
+                    running.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    running.kill()
+
+            install_dir = (self.games_dir / safe_game_id).resolve()
+            games_root = self.games_dir.resolve()
+            try:
+                install_dir.relative_to(games_root)
+            except ValueError as error:
+                raise ValueError("Game folder is outside the local games directory.") from error
+            if install_dir.is_dir():
+                shutil.rmtree(install_dir)
+            elif install_dir.exists():
+                install_dir.unlink()
+
+            thumbnail_path = str(game["thumbnail_path"] or "").strip()
+            if thumbnail_path:
+                thumbnail_name = Path(safe_url_path(thumbnail_path)).name
+                thumbnail_file = self.thumbnails_dir / thumbnail_name
+                if thumbnail_file.is_file():
+                    thumbnail_file.unlink()
+
+            conn.execute("DELETE FROM games WHERE id = ?", (safe_game_id,))
+
     def update_game_metadata(self, game_id: str, form: dict[str, list[str]], thumbnail_upload: dict[str, Any] | None = None) -> None:
         title = first_form_value(form, "title").strip()
         authors = json_list_from_text(first_form_value(form, "authors"))
@@ -2708,13 +2788,16 @@ class BitcadeApp:
           <p class="eyebrow">Local host only</p>
           <h1>{upload_label}</h1>
           <p>Share this one-time code with the student device that is uploading.</p>
-          <p class="screen-code"><strong>{code}</strong></p>
-          <p>This page is only available from the Bitcade machine itself.</p>
+          <p class="screen-code"><strong>{code}</strong><a class="button secondary small" href="/student/code">Refresh</a></p>
+          <p>This page is only available from the Bitcade machine itself and refreshes automatically.</p>
         </section>
         <div class="form-actions">
           <a class="button secondary" href="/student">Back to student upload</a>
           <a class="button secondary" href="/play">Back to play menu</a>
         </div>
+        <script>
+          window.setTimeout(() => window.location.reload(), 60000);
+        </script>
         """
         return self.html_page("Student Upload Code", body)
 
@@ -2786,7 +2869,7 @@ class BitcadeApp:
         metadata = read_metadata(self.games_dir / game_id)
         body = f"""
         <section class="game-shell" aria-label="Previewing {html.escape(game['title'])}">
-          <iframe class="game-frame" title="{html.escape(game['title'])}" src="/game-files/{html.escape(game_id)}/{html.escape(game['entry_path'])}" tabindex="0" allowfullscreen></iframe>
+          <iframe class="game-frame" title="{html.escape(game['title'])}" src="/admin/game-files/{html.escape(game_id)}/{html.escape(game['entry_path'])}" tabindex="0" allowfullscreen></iframe>
           <a class="game-return button secondary small" href="/admin">Admin</a>
         </section>
         {GAME_FIT_SCRIPT}
@@ -2794,18 +2877,23 @@ class BitcadeApp:
         """
         return self.response(start_response, "200 OK", self.html_page(f"Previewing {game['title']}", body, body_class="game-page", show_chrome=False))
 
-    def preview_student_game(self, start_response, game_id: str):
+    def preview_student_game(self, start_response, game_id: str, token: str):
         with self.connect() as conn:
             game = conn.execute("SELECT * FROM games WHERE id = ? AND status = 'pending'", (game_id,)).fetchone()
             if game is None:
                 return self.not_found(start_response)
+            try:
+                self.require_student_preview_token(game, token)
+            except ValueError:
+                return self.not_found(start_response)
             game = dict(game)
         if game["platform"] == PYTHON_GAME_PLATFORM:
-            return self.launch_native_python_game(start_response, game, "/student", preview=True)
+            return self.response(start_response, "403 Forbidden", b"Python/Pygame previews require teacher/admin review.", "text/plain; charset=utf-8")
         metadata = read_metadata(self.games_dir / game_id)
+        escaped_token = html.escape(quote(token))
         body = f"""
         <section class="game-shell" aria-label="Student preview {html.escape(game['title'])}">
-          <iframe class="game-frame" title="{html.escape(game['title'])}" src="/game-files/{html.escape(game_id)}/{html.escape(game['entry_path'])}" tabindex="0" allowfullscreen></iframe>
+          <iframe class="game-frame" title="{html.escape(game['title'])}" src="/student/game-files/{html.escape(game_id)}/{html.escape(game['entry_path'])}?token={escaped_token}" tabindex="0" allowfullscreen></iframe>
           <a class="game-return button secondary small" href="/student">Student Upload</a>
         </section>
         {GAME_FIT_SCRIPT}
@@ -2914,7 +3002,10 @@ class BitcadeApp:
 
     def render_upload_guides(self, *, base_path: str = "/admin/guides", back_link: str = "/admin") -> bytes:
         cards = []
+        student_context = base_path.startswith("/student")
         for guide_id, guide in sorted(FORMAT_GUIDES.items()):
+            if student_context and guide_id == "python-pygame":
+                continue
             template_link = ""
             if guide.get("template_path"):
                 template_link = f'<a class="button" href="{html.escape(base_path)}/{html.escape(guide_id)}/template.zip">Download template</a>'
@@ -2941,6 +3032,8 @@ class BitcadeApp:
         return self.html_page("Upload Guides", body)
 
     def render_upload_guide(self, guide_id: str, *, base_path: str = "/admin/guides", back_link: str = "/admin") -> bytes:
+        if base_path.startswith("/student") and guide_id == "python-pygame":
+            return self.html_page("Guide not found", f"<h1>Guide not found</h1><p><a href=\"{html.escape(base_path)}\">Back to guides</a></p>")
         guide = FORMAT_GUIDES.get(guide_id)
         if guide is None:
             return self.html_page("Guide not found", f"<h1>Guide not found</h1><p><a href=\"{html.escape(base_path)}\">Back to guides</a></p>")
@@ -3034,12 +3127,12 @@ class BitcadeApp:
         return f"""
           <h2>Game details</h2>
           <div class="field-row">
-            <label>Title <input name="title" required></label>
-            <label>Authors <textarea name="authors" required placeholder="One name per line"></textarea></label>
+            <label>Title <input name="title" placeholder="Uses package name if blank"></label>
+            <label>Authors <textarea name="authors" placeholder="One name per line; uses empty if blank"></textarea></label>
           </div>
-          <label>Description <textarea name="description" required></textarea></label>
+          <label>Description <textarea name="description" placeholder="Uses empty if blank"></textarea></label>
           <div class="field-row">
-            <label>License <input name="license" value="Classroom use only" required></label>
+            <label>License <input name="license" value="Classroom use only"></label>
             <label>Credits <textarea name="credits" placeholder="One credit per line"></textarea></label>
           </div>
           <h2>Players and input</h2>
@@ -3066,8 +3159,8 @@ class BitcadeApp:
           </div>
           <h2>Display</h2>
           <div class="field-row">
-            <label>Viewport width <input type="number" name="display_width" min="1" value="{width}" required></label>
-            <label>Viewport height <input type="number" name="display_height" min="1" value="{height}" required></label>
+            <label>Viewport width <input type="number" name="display_width" min="1" value="{width}"></label>
+            <label>Viewport height <input type="number" name="display_height" min="1" value="{height}"></label>
           </div>
           <div class="field-row">
             <label>Scaling <select name="display_scaling">{scaling_options}</select></label>
@@ -3100,15 +3193,15 @@ class BitcadeApp:
           </div>
         """
 
-    def render_student_upload(self, message: str = "", level: str = "info", preview_game_id: str = "") -> bytes:
+    def render_student_upload(self, message: str = "", level: str = "info", preview_game_id: str = "", preview_token: str = "") -> bytes:
         alert = f'<p class="notice {html.escape(level)}">{html.escape(message)}</p>' if message else ""
         preview = ""
-        if preview_game_id:
+        if preview_game_id and preview_token:
             preview = f"""
             <section class="panel">
               <h2>Preview submitted game</h2>
               <p>Your upload is pending teacher approval. Open it here to confirm the package launches on Bitcade before your teacher reviews it.</p>
-              <a class="button" href="/student/games/{html.escape(preview_game_id)}/preview" data-nav-start>Preview game</a>
+              <a class="button" href="/student/games/{html.escape(preview_game_id)}/preview?token={html.escape(quote(preview_token))}" data-nav-start>Preview game</a>
             </section>"""
         body = f"""
         <section class="hero compact">
@@ -3134,7 +3227,7 @@ class BitcadeApp:
             {self.render_student_metadata_fields()}
             <button class="button" type="submit">Build JSON and submit</button>
           </form>
-          <p>Reference guides: <a href="/student/guides/p5js">p5.js</a> · <a href="/student/guides/scratch">Scratch</a> · <a href="/student/guides/python-pygame">Python/Pygame</a> · <a href="/student/guides">All formats</a></p>
+          <p>Reference guides: <a href="/student/guides/p5js">p5.js</a> · <a href="/student/guides/scratch">Scratch</a> · <a href="/student/guides">All student formats</a></p>
         </section>
         """
         return self.html_page("Student Upload", body)
@@ -3723,7 +3816,23 @@ class BitcadeApp:
             combo = value.strip()
             if not combo:
                 return ""
-            parts = [part.strip() for part in combo.split("+") if part.strip()]
+            parts = []
+            position = 0
+            while position < len(combo):
+                while position < len(combo) and combo[position].isspace():
+                    position += 1
+                match = BINDING_TOKEN_PATTERN.match(combo, position)
+                if not match:
+                    raise ValueError(f"{label} must use button:N or axis:N:+/- bindings joined with +.")
+                parts.append(match.group(0))
+                position = match.end()
+                while position < len(combo) and combo[position].isspace():
+                    position += 1
+                if position >= len(combo):
+                    break
+                if combo[position] != "+":
+                    raise ValueError(f"{label} must use button:N or axis:N:+/- bindings joined with +.")
+                position += 1
             if not parts:
                 return ""
             for index, part in enumerate(parts, start=1):
@@ -3780,6 +3889,10 @@ class BitcadeApp:
             <form action="/admin/games/{html.escape(game['id'])}/status" method="post">
               <input type="hidden" name="status" value="{status}">
               <button class="button secondary small" type="submit">{label}</button>
+            </form>""")
+        actions.append(f"""
+            <form action="/admin/games/{html.escape(game['id'])}/delete" method="post" onsubmit="return confirm('Delete this game and its local files?');">
+              <button class="button danger small" type="submit">Delete</button>
             </form>""")
         return "".join(actions)
 
@@ -3885,16 +3998,34 @@ class BitcadeApp:
         </section>
         """
 
-    def serve_game_file(self, start_response, rest: str):
+    def serve_game_file(self, start_response, rest: str, *, allowed_statuses: tuple[str, ...] | None = ("approved",)):
         parts = rest.split("/", 1)
         if len(parts) != 2:
             return self.not_found(start_response)
         game_id = safe_url_path(parts[0])
         filename = safe_url_path(parts[1])
         with self.connect() as conn:
-            game = conn.execute("SELECT 1 FROM games WHERE id = ?", (game_id,)).fetchone()
+            game = conn.execute("SELECT status FROM games WHERE id = ?", (game_id,)).fetchone()
+        if game is None or (allowed_statuses is not None and str(game["status"]) not in allowed_statuses):
+            return self.not_found(start_response)
+        return self.serve_file(start_response, self.games_dir / game_id / filename)
+
+    def serve_student_game_file(self, start_response, rest: str, token: str):
+        parts = rest.split("/", 1)
+        if len(parts) != 2:
+            return self.not_found(start_response)
+        game_id = safe_url_path(parts[0])
+        filename = safe_url_path(parts[1])
+        with self.connect() as conn:
+            game = conn.execute("SELECT * FROM games WHERE id = ? AND status = 'pending'", (game_id,)).fetchone()
         if game is None:
             return self.not_found(start_response)
+        try:
+            self.require_student_preview_token(game, token)
+        except ValueError:
+            return self.not_found(start_response)
+        if game["platform"] == PYTHON_GAME_PLATFORM:
+            return self.response(start_response, "403 Forbidden", b"Python/Pygame previews require teacher/admin review.", "text/plain; charset=utf-8")
         return self.serve_file(start_response, self.games_dir / game_id / filename)
 
     def serve_thumbnail(self, start_response, filename: str):

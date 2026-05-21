@@ -61,6 +61,7 @@ p { color: var(--muted); font-size: 1.05rem; }
 .badges li { padding: 0.35rem 0.55rem; border-radius: 999px; background: rgba(255, 255, 255, 0.1); color: var(--muted); font-size: 0.88rem; }
 .button { display: inline-flex; align-items: center; justify-content: center; margin-top: 0.6rem; padding: 0.85rem 1rem; border: 0; border-radius: 0.8rem; background: var(--accent); color: #101426; font: inherit; font-weight: 900; text-decoration: none; cursor: pointer; }
 .button.secondary { background: transparent; color: var(--text); border: 1px solid rgba(255, 255, 255, 0.24); }
+.button.danger { background: rgba(255, 97, 97, 0.18); color: #ffd8d8; border: 1px solid rgba(255, 97, 97, 0.46); }
 .button.small { margin-top: 0; padding: 0.45rem 0.65rem; border-radius: 0.55rem; font-size: 0.86rem; white-space: nowrap; }
 .launch-header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; margin-bottom: 1rem; }
 .launch-header h1 { font-size: clamp(2rem, 5vw, 4rem); }
