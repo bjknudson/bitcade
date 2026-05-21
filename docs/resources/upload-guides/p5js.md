@@ -147,7 +147,7 @@ feels.
       "down": "ArrowDown",
       "left": "ArrowLeft",
       "right": "ArrowRight",
-      "a": "Space",
+      "a": "ArrowUp",
       "b": "Shift",
       "start": "Enter"
     },
@@ -168,7 +168,7 @@ The upload page should provide a copyable local profile similar to:
 ```text
 Safe viewport: 1900x1080
 Menu: Arrow keys move, Space/Enter selects
-Player 1: Arrow keys, Space, Shift, Enter
+Player 1: Arrow keys, primary A can also send ArrowUp for jump, Shift, Enter
 Exit: hold Escape for 3 seconds
 Timing: use delta time or viewport-scaled movement
 ```
@@ -176,6 +176,18 @@ Timing: use delta time or viewport-scaled movement
 Use this profile while building the game, especially when choosing canvas size,
 movement speed, collision sizes, and button prompts. Avoid hard-coding gameplay
 around a smaller canvas and then simply stretching it to the Bitcade screen.
+
+### Control schemes and playability
+
+For platformers, map jump to a button as well as the up direction. If the game
+uses `ArrowUp` for jump, set `controls.player1.a` to `ArrowUp` so the primary
+gamepad button jumps without making the player flick the stick upward.
+
+For top-down games where up is continuous movement, keep `controls.player1.up`
+as `ArrowUp` and set `controls.player1.a` to the key used for the main action,
+such as `Space`. The important rule is that the `controls` object should name
+the keys the game already listens for; Bitcade maps the physical gamepad to
+those keys during preview and play.
 
 ## Step 5: High-score reporting
 

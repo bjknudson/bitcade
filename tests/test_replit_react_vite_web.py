@@ -268,6 +268,7 @@ class ReplitReactViteWebTests(unittest.TestCase):
         self.assertEqual(metadata["platform"], "scratch")
         self.assertEqual(metadata["entry"], "index.html")
         self.assertEqual(metadata["display"]["width"], 480)
+        self.assertEqual(metadata["controls"]["player1"]["a"], "ArrowUp")
 
     def test_raw_scratch_project_upload_has_specific_error(self) -> None:
         buffer = BytesIO()
@@ -329,11 +330,14 @@ class ReplitReactViteWebTests(unittest.TestCase):
         self.assertEqual(metadata["credits"], ["empty"])
         self.assertEqual(metadata["display"]["width"], 1900)
         self.assertEqual(metadata["display"]["height"], 1080)
+        self.assertEqual(metadata["controls"]["player1"]["up"], "ArrowUp")
+        self.assertEqual(metadata["controls"]["player1"]["a"], "ArrowUp")
 
     def test_student_metadata_fields_are_optional_in_form(self) -> None:
         rendered = self.app.render_student_upload().decode("utf-8")
 
         self.assertIn('name="title" placeholder="Uses package name if blank"', rendered)
+        self.assertIn('<option value="ArrowUp" selected>ArrowUp</option>', rendered)
         self.assertNotIn('name="authors" required', rendered)
         self.assertNotIn('name="description" required', rendered)
         self.assertNotIn('name="display_width" min="1" value="1900" required', rendered)
@@ -341,6 +345,7 @@ class ReplitReactViteWebTests(unittest.TestCase):
     def test_upload_code_page_has_refresh_controls(self) -> None:
         rendered = self.app.render_local_student_code().decode("utf-8")
 
+        self.assertIn('no-gamepad-nav', rendered)
         self.assertIn('href="/student/code">Refresh</a>', rendered)
         self.assertIn("window.location.reload()", rendered)
 
@@ -452,7 +457,7 @@ class ReplitReactViteWebTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM files WHERE game_id = ?", (game_id,)).fetchone()[0], 0)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM play_sessions WHERE game_id = ?", (game_id,)).fetchone()[0], 0)
 
-    def test_admin_list_includes_delete_action(self) -> None:
+    def test_admin_list_uses_bulk_delete_selection(self) -> None:
         buffer = BytesIO()
         with zipfile.ZipFile(buffer, "w") as archive:
             archive.writestr(
@@ -464,8 +469,37 @@ class ReplitReactViteWebTests(unittest.TestCase):
 
         rendered = self.app.render_admin().decode("utf-8")
 
-        self.assertIn(f'action="/admin/games/{game_id}/delete"', rendered)
-        self.assertIn("Delete this game and its local files?", rendered)
+        self.assertIn('id="bulk-delete-form"', rendered)
+        self.assertIn('action="/admin/games/delete-selected"', rendered)
+        self.assertIn(f'name="selected_game" value="{game_id}" form="bulk-delete-form"', rendered)
+        self.assertIn("Delete selected", rendered)
+        self.assertIn("Delete selected games and their local files?", rendered)
+        self.assertNotIn(f'action="/admin/games/{game_id}/delete"', rendered)
+
+    def test_delete_games_removes_selected_records_and_folders(self) -> None:
+        game_ids = []
+        for name in ("Scratch One.zip", "Scratch Two.zip"):
+            buffer = BytesIO()
+            with zipfile.ZipFile(buffer, "w") as archive:
+                archive.writestr(
+                    "scratch-racer/index.html",
+                    "<!doctype html><script>window.TurboWarp = { project: true };</script>",
+                )
+            buffer.seek(0)
+            game_ids.append(self.app.install_uploaded_package(buffer, name))
+
+        deleted = self.app.delete_games(game_ids)
+
+        self.assertEqual(deleted, 2)
+        for game_id in game_ids:
+            self.assertFalse((self.app.games_dir / game_id).exists())
+        with self.app.connect() as conn:
+            remaining = conn.execute("SELECT COUNT(*) FROM games").fetchone()[0]
+        self.assertEqual(remaining, 0)
+
+    def test_delete_games_requires_selection(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Select at least one game"):
+            self.app.delete_games([])
 
     def test_gamepad_menu_combo_accepts_positive_axis_binding(self) -> None:
         form = {

@@ -84,7 +84,7 @@ For a complete package, add `bitcade.json` next to `index.html`.
       "down": "ArrowDown",
       "left": "ArrowLeft",
       "right": "ArrowRight",
-      "a": "Space",
+      "a": "ArrowUp",
       "b": "Shift",
       "start": "Enter"
     },
@@ -98,6 +98,10 @@ For a complete package, add `bitcade.json` next to `index.html`.
 
 Scratch's stage is normally 480x360. Use `display.scaling: "fit"` unless the
 game has been intentionally redesigned for a different viewport.
+
+If the Scratch game uses the up arrow to jump, keep `controls.player1.a` set to
+`ArrowUp` so the primary gamepad button also jumps. If the game uses Space for
+the main action instead, change `controls.player1.a` to `Space`.
 
 ## High-score reporting
 

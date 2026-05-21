@@ -161,7 +161,7 @@ A package must include `bitcade.json` at the top of the game folder.
       "down": "ArrowDown",
       "left": "ArrowLeft",
       "right": "ArrowRight",
-      "a": "Space",
+      "a": "ArrowUp",
       "b": "Shift",
       "start": "Enter"
     },
@@ -170,7 +170,7 @@ A package must include `bitcade.json` at the top of the game folder.
       "down": "S",
       "left": "A",
       "right": "D",
-      "a": "F",
+      "a": "W",
       "b": "G",
       "start": "R"
     },
@@ -289,6 +289,12 @@ Use `controls.player1`, `controls.player2`, and `controls.system` to describe th
 | `controls.system.menu` | `SYSTEM_MENU` |
 
 For one-player games, `controls.player2` may be omitted. System controls should still be documented so the runtime can preserve a reliable return-to-menu path.
+
+For platformers, it is usually better for the physical primary action button to
+duplicate the jump key. For example, if Player 1 jumps with `ArrowUp`, use
+`controls.player1.a: "ArrowUp"`. Top-down or shooter games may instead map
+`controls.player1.a` to `Space` or another action key. The mapping describes the
+keys the game expects, not the physical button labels.
 
 ## 10. Local install profile compatibility
 

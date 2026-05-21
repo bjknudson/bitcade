@@ -684,7 +684,9 @@ KEYBOARD_NAV_SCRIPT = """
 GAMEPAD_NAV_SCRIPT = """
   <script>
   (() => {
+    if (document.body.classList.contains("no-gamepad-nav")) return;
     const navState = { up: false, down: false, left: false, right: false, activate: false, lastMove: 0 };
+    let lastPoll = 0;
 
     const sendKey = (key) => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
@@ -692,7 +694,12 @@ GAMEPAD_NAV_SCRIPT = """
 
     const pressed = (gamepad, button) => Boolean(gamepad.buttons[button] && gamepad.buttons[button].pressed);
 
-    const poll = () => {
+    const poll = (timestamp = 0) => {
+      if (timestamp - lastPoll < 100) {
+        requestAnimationFrame(poll);
+        return;
+      }
+      lastPoll = timestamp;
       const gamepad = navigator.getGamepads ? Array.from(navigator.getGamepads()).find(Boolean) : null;
       if (gamepad && !document.body.classList.contains("game-page")) {
         const now = performance.now();
@@ -1399,15 +1406,16 @@ class BitcadeApp:
                 fields, files = self.parse_multipart(environ, content_length)
                 self.update_branding_settings({key: [value] for key, value in fields.items()}, files)
                 return self.redirect(start_response, "/admin/branding?message=Branding%20settings%20updated.")
+            if path == "/admin/games/delete-selected":
+                form = self.parse_urlencoded(environ)
+                deleted_count = self.delete_games(form.get("selected_game", []))
+                game_word = "game" if deleted_count == 1 else "games"
+                return self.redirect_admin(start_response, f"Deleted {deleted_count} {game_word}.")
             if path.startswith("/admin/games/") and path.endswith("/status"):
                 game_id = safe_url_path(path.removeprefix("/admin/games/").removesuffix("/status"))
                 form = self.parse_urlencoded(environ)
                 self.update_game_status(game_id, first_form_value(form, "status"))
                 return self.redirect_admin(start_response, "Game status updated.")
-            if path.startswith("/admin/games/") and path.endswith("/delete"):
-                game_id = safe_url_path(path.removeprefix("/admin/games/").removesuffix("/delete"))
-                self.delete_game(game_id)
-                return self.redirect_admin(start_response, "Game deleted.")
             if path.startswith("/admin/games/") and path.endswith("/edit"):
                 game_id = safe_url_path(path.removeprefix("/admin/games/").removesuffix("/edit"))
                 content_type = environ.get("CONTENT_TYPE", "")
@@ -2351,7 +2359,7 @@ class BitcadeApp:
                 "down": key("p1_down", "ArrowDown"),
                 "left": key("p1_left", "ArrowLeft"),
                 "right": key("p1_right", "ArrowRight"),
-                "a": key("p1_a", "Space"),
+                "a": key("p1_a", "ArrowUp"),
                 "b": key("p1_b", "Shift"),
                 "start": key("p1_start", "Enter"),
             },
@@ -2366,7 +2374,7 @@ class BitcadeApp:
                 "down": key("p2_down", "S"),
                 "left": key("p2_left", "A"),
                 "right": key("p2_right", "D"),
-                "a": key("p2_a", "F"),
+                "a": key("p2_a", "W"),
                 "b": key("p2_b", "G"),
                 "start": key("p2_start", "R"),
             }
@@ -2481,7 +2489,7 @@ class BitcadeApp:
                     "down": "ArrowDown",
                     "left": "ArrowLeft",
                     "right": "ArrowRight",
-                    "a": "Space",
+                    "a": "ArrowUp",
                     "b": "Shift",
                     "start": "Enter",
                 },
@@ -2555,7 +2563,7 @@ class BitcadeApp:
                     "down": "ArrowDown",
                     "left": "ArrowLeft",
                     "right": "ArrowRight",
-                    "a": "Space",
+                    "a": "ArrowUp",
                     "b": "Shift",
                     "start": "Enter",
                 },
@@ -2633,6 +2641,16 @@ class BitcadeApp:
                     thumbnail_file.unlink()
 
             conn.execute("DELETE FROM games WHERE id = ?", (safe_game_id,))
+
+    def delete_games(self, game_ids: list[str]) -> int:
+        selected = [game_id.strip() for game_id in game_ids if game_id.strip()]
+        if not selected:
+            raise ValueError("Select at least one game to delete.")
+        deleted = 0
+        for game_id in selected:
+            self.delete_game(game_id)
+            deleted += 1
+        return deleted
 
     def update_game_metadata(self, game_id: str, form: dict[str, list[str]], thumbnail_upload: dict[str, Any] | None = None) -> None:
         title = first_form_value(form, "title").strip()
@@ -2799,7 +2817,7 @@ class BitcadeApp:
           window.setTimeout(() => window.location.reload(), 60000);
         </script>
         """
-        return self.html_page("Student Upload Code", body)
+        return self.html_page("Student Upload Code", body, body_class="no-gamepad-nav")
 
     def render_game_info(self, start_response, game_id: str):
         with self.connect() as conn:
@@ -3172,7 +3190,7 @@ class BitcadeApp:
             {self.render_key_select("p1_down", "Down", "ArrowDown")}
             {self.render_key_select("p1_left", "Left", "ArrowLeft")}
             {self.render_key_select("p1_right", "Right", "ArrowRight")}
-            {self.render_key_select("p1_a", "Main action", "Space")}
+            {self.render_key_select("p1_a", "Main action", "ArrowUp")}
             {self.render_key_select("p1_b", "Second action", "Shift")}
             {self.render_key_select("p1_start", "Start", "Enter")}
           </div>
@@ -3182,7 +3200,7 @@ class BitcadeApp:
             {self.render_key_select("p2_down", "Down", "S")}
             {self.render_key_select("p2_left", "Left", "A")}
             {self.render_key_select("p2_right", "Right", "D")}
-            {self.render_key_select("p2_a", "Main action", "F")}
+            {self.render_key_select("p2_a", "Main action", "W")}
             {self.render_key_select("p2_b", "Second action", "G")}
             {self.render_key_select("p2_start", "Start", "R")}
           </div>
@@ -3256,6 +3274,7 @@ class BitcadeApp:
             actions = self.render_status_actions(game)
             rows.append(f"""
             <tr>
+              <td><label class="select-game"><input type="checkbox" name="selected_game" value="{html.escape(game['id'])}" form="bulk-delete-form"> <span>Select</span></label></td>
               <td>{html.escape(game['title'])}</td>
               <td>{html.escape(game['status'])}</td>
               <td>{game['min_players']}-{game['max_players']}</td>
@@ -3287,10 +3306,17 @@ class BitcadeApp:
           <p>Admin uploads are protected by login. Student uploads use the short code shown on the Bitcade play screen.</p>
         </section>
         {self.render_install_profile_panel(compact=True)}
+        <form id="bulk-delete-form" action="/admin/games/delete-selected" method="post" onsubmit="return confirm('Delete selected games and their local files?');"></form>
+        <div class="bulk-actions">
+          <button class="button danger small" type="submit" form="bulk-delete-form">Delete selected</button>
+        </div>
         <table class="admin-table">
-          <thead><tr><th>Title</th><th>Status</th><th>Players</th><th>Plays</th><th>Last played</th><th>Actions</th></tr></thead>
-          <tbody>{''.join(rows) or '<tr><td colspan="6">No games installed.</td></tr>'}</tbody>
+          <thead><tr><th>Select</th><th>Title</th><th>Status</th><th>Players</th><th>Plays</th><th>Last played</th><th>Actions</th></tr></thead>
+          <tbody>{''.join(rows) or '<tr><td colspan="7">No games installed.</td></tr>'}</tbody>
         </table>
+        <div class="bulk-actions">
+          <button class="button danger small" type="submit" form="bulk-delete-form">Delete selected</button>
+        </div>
         """
         return self.html_page("Admin", body)
 
@@ -3889,10 +3915,6 @@ class BitcadeApp:
             <form action="/admin/games/{html.escape(game['id'])}/status" method="post">
               <input type="hidden" name="status" value="{status}">
               <button class="button secondary small" type="submit">{label}</button>
-            </form>""")
-        actions.append(f"""
-            <form action="/admin/games/{html.escape(game['id'])}/delete" method="post" onsubmit="return confirm('Delete this game and its local files?');">
-              <button class="button danger small" type="submit">Delete</button>
             </form>""")
         return "".join(actions)
 
