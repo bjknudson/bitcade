@@ -177,7 +177,50 @@ Use this profile while building the game, especially when choosing canvas size,
 movement speed, collision sizes, and button prompts. Avoid hard-coding gameplay
 around a smaller canvas and then simply stretching it to the Bitcade screen.
 
-## Step 5: Test offline
+## Step 5: High-score reporting
+
+When Bitcade high-score support is enabled, p5.js games should declare a
+`scores` object in `bitcade.json` and send a final score event to the Bitcade
+launcher. The launcher can then decide whether the score qualifies, prompt for a
+player tag, and store the result in the local leaderboard database.
+
+Leaderboards are scoped to this game, not compared across games. Add or update
+the package `version` when a change makes scores easier, harder, faster, or
+otherwise unfair to compare with older submissions.
+
+```json
+{
+  "enabled": true,
+  "label": "Score",
+  "order": "desc",
+  "unit": "points",
+  "precision": 0,
+  "ties": "earliest"
+}
+```
+
+For browser games, report the score with the Bitcade JavaScript helper when one
+is available, or send a structured message to the launcher:
+
+```javascript
+function submitBitcadeScore(finalScore) {
+  window.parent.postMessage(
+    {
+      type: "bitcade:score",
+      score: finalScore,
+      display: String(finalScore),
+      player: 1
+    },
+    window.location.origin
+  );
+}
+```
+
+Do this once when the run is over, not every frame. If the game collects a tag
+itself, include `tag`; otherwise Bitcade should prompt for the tag as an
+overlay or after exit.
+
+## Step 6: Test offline
 
 Before zipping the folder, open `index.html` locally in a browser.
 
@@ -187,9 +230,10 @@ The game is ready when:
 - Keyboard or mouse input works.
 - Images and sounds load.
 - No browser console errors mention missing files.
+- Any high-score event is sent only at the end of a run.
 - The game still works with Wi-Fi turned off.
 
-## Step 6: Create the zip for a complete package
+## Step 7: Create the zip for a complete package
 
 Zip the top-level folder itself, not just the files inside it.
 

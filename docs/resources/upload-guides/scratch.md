@@ -99,6 +99,23 @@ For a complete package, add `bitcade.json` next to `index.html`.
 Scratch's stage is normally 480x360. Use `display.scaling: "fit"` unless the
 game has been intentionally redesigned for a different viewport.
 
+## High-score reporting
+
+When Bitcade high-score support is enabled, Scratch packages should only enable
+leaderboards if the exported offline HTML wrapper can send a score event to
+Bitcade. A raw Scratch project variable is not enough by itself because Bitcade
+runs the packaged browser export, not the Scratch editor.
+
+For Scratch and TurboWarp exports, the platform guide should document the exact
+wrapper or extension path that sends a final score to the Bitcade launcher. If
+the export cannot emit a score event, leave high scores disabled for that game.
+Bitcade should not ask for a player tag unless it has received a qualifying
+score.
+
+Leaderboards are scoped to this Scratch game, not compared across games. Add or
+update the package `version` when a change makes scores easier, harder, faster,
+or otherwise unfair to compare with older submissions.
+
 ## Test offline
 
 Before zipping the package:

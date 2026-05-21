@@ -87,6 +87,46 @@ unless your teacher gives the class a smaller fixed size.
 - Do not include `requirements.txt`, `pyproject.toml`, `setup.py`, or `setup.cfg`.
 - Do not shell out to other programs.
 
+## High-score reporting
+
+When Bitcade high-score support is enabled, Python/Pygame games should declare
+a `scores` object in `bitcade.json` and print one structured score event to
+stdout when the run is complete. Bitcade captures that event through the native
+adapter, decides whether the score qualifies, prompts for a player tag if
+needed, and stores the result in the local leaderboard database.
+
+Leaderboards are scoped to this game, not compared across games. Add or update
+the package `version` when a change makes scores easier, harder, faster, or
+otherwise unfair to compare with older submissions.
+
+```json
+{
+  "enabled": true,
+  "label": "Score",
+  "order": "desc",
+  "unit": "points",
+  "precision": 0,
+  "ties": "earliest"
+}
+```
+
+Use the `BITCADE_SCORE` prefix so Bitcade can distinguish score data from
+normal logs:
+
+```python
+import json
+
+def submit_bitcade_score(final_score):
+    print("BITCADE_SCORE " + json.dumps({
+        "score": final_score,
+        "display": str(final_score),
+        "player": 1
+    }), flush=True)
+```
+
+Call this once when the game is over. If the game collects a player tag itself,
+include `tag`; otherwise Bitcade should prompt for the tag after the game exits.
+
 ## Minimal main.py
 
 ```python

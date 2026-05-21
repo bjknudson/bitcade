@@ -103,6 +103,7 @@ A package must include `bitcade.json` at the top of the game folder.
 | --- | --- | --- | --- |
 | `title` | string | Yes | Display name in the arcade menu. |
 | `authors` | array of strings | Yes | Student, team, or class author names. |
+| `version` | string | Optional | Game version. Use this to separate leaderboards when scoring balance changes. |
 | `platform` | string | Yes | One of the supported platform values. |
 | `entry` | string | Yes | Usually `index.html`. Must point to an allowed file inside the package. |
 | `description` | string | Yes | Short game description for the details page. |
@@ -112,6 +113,7 @@ A package must include `bitcade.json` at the top of the game folder.
 | `input` | object | Yes | Keyboard, mouse, gamepad, and shared-keyboard requirements. |
 | `display` | object | Recommended | Intended game viewport and scaling assumptions. |
 | `controls` | object | Yes | Game-specific key mapping for virtual Bitcade controls. |
+| `scores` | object | Optional | High-score reporting and ranking metadata. |
 
 ### Example
 
@@ -119,6 +121,7 @@ A package must include `bitcade.json` at the top of the game folder.
 {
   "title": "Orbit Snack",
   "authors": ["Student Name"],
+  "version": "1.0.0",
   "platform": "p5js",
   "entry": "index.html",
   "description": "Collect snacks while avoiding orbiting obstacles.",
@@ -143,6 +146,14 @@ A package must include `bitcade.json` at the top of the game folder.
     "height": 1080,
     "scaling": "fit",
     "speedModel": "delta-time"
+  },
+  "scores": {
+    "enabled": true,
+    "label": "Score",
+    "order": "desc",
+    "unit": "points",
+    "precision": 0,
+    "ties": "earliest"
   },
   "controls": {
     "player1": {
@@ -304,7 +315,84 @@ Space/Enter. Player 1 uses Arrow keys, Space, Shift, and Enter. Escape held for
 This copied profile is not a replacement for `bitcade.json`; it is a starting
 contract that helps the game match the machine before upload.
 
-## 11. Allowed and blocked file types
+## 11. High-score reporting
+
+High scores are optional. A game that wants Bitcade leaderboards must declare a
+`scores` object and submit score events through the platform-specific Bitcade
+runtime bridge. Scores are ranked only against entries for the same game, and
+against the same game version when `version` is declared. Bitcade should not
+compare scores across different games because there is no cross-game scoring
+standard.
+
+Recommended `scores` fields:
+
+| Field | Type | Purpose |
+| --- | --- | --- |
+| `scores.enabled` | boolean | `true` when the game can submit scores to Bitcade. |
+| `scores.label` | string | Display label such as `Score`, `Time`, `Coins`, or `Distance`. |
+| `scores.order` | string | `desc` when larger values rank higher, `asc` when smaller values rank higher. |
+| `scores.unit` | string | Optional unit such as `points`, `seconds`, `meters`, or `waves`. |
+| `scores.precision` | integer | Number of decimal places to show when Bitcade formats the score. |
+| `scores.ties` | string | `earliest` or `latest`; first build should prefer `earliest`. |
+
+Use `version` when an update changes score balance, difficulty, timing,
+available lives, enemy behavior, level layout, scoring formulas, or any other
+rule that could make old and new scores unfair to compare. A new version should
+start a separate leaderboard by default. If a teacher is certain an update did
+not affect scoring, the admin UI may allow scores to remain on the same version
+board.
+
+Score submissions should include:
+
+| Field | Purpose |
+| --- | --- |
+| `score` | Numeric sort value used by Bitcade for ranking. |
+| `display` | Optional display string, such as `1,250` or `1:23.45`. |
+| `player` | Optional player number for simultaneous games. |
+| `tag` | Optional short player tag if the game collected one itself. |
+| `metadata` | Optional JSON-safe details such as level, wave, mode, or difficulty. |
+
+Browser games should report scores with a Bitcade JavaScript helper when one is
+available, or by sending a structured message to the launcher:
+
+```javascript
+window.parent.postMessage(
+  {
+    type: "bitcade:score",
+    score: 1250,
+    display: "1,250",
+    player: 1,
+    metadata: { level: 4 }
+  },
+  window.location.origin
+);
+```
+
+Python/Pygame games should print one structured line to stdout when a score is
+final:
+
+```python
+import json
+
+print("BITCADE_SCORE " + json.dumps({
+    "score": 1250,
+    "display": "1,250",
+    "player": 1,
+    "metadata": {"level": 4}
+}), flush=True)
+```
+
+Bitcade should prompt for a player tag only when a score qualifies for storage.
+The tag prompt can happen in the game, as a launcher overlay, or after exit. If
+the game supplies `tag`, Bitcade may skip the prompt after validating the tag.
+Tags should be short public handles, not student names or accounts.
+
+Scratch, TurboWarp, and other wrapped browser exports need format-specific
+instructions because the generated player controls what JavaScript can run. If
+an exported game cannot emit a score event, Bitcade should leave high scores
+disabled for that package.
+
+## 12. Allowed and blocked file types
 
 Browser packages allow static browser-game assets only. Python/Pygame packages additionally allow `.py` files, but Bitcade does not install per-game Python dependencies from uploaded packages.
 
@@ -348,7 +436,7 @@ Browser packages allow static browser-game assets only. Python/Pygame packages a
 
 Blocked types may be supported later only through explicit advanced adapters. Python/Pygame packages must not include `requirements.txt`, `pyproject.toml`, `setup.py`, or `setup.cfg`; the Pi installer provides the supported pygame runtime.
 
-## 12. Validation requirements
+## 13. Validation requirements
 
 Bitcade should reject or flag packages that violate these rules:
 
@@ -364,11 +452,13 @@ Bitcade should reject or flag packages that violate these rules:
   declares `fixed-pixels` without a teacher-approved reason.
 - `platform` is not supported.
 - Player count is invalid, such as `min` below `1` or `max` below `min`.
+- Score metadata is invalid, such as enabling scores without a supported
+  `scores.order`.
 - File extension is blocked or unknown.
 - Hidden system junk is used as a required package file.
 - Player controls conflict in a way that makes a two-player game unplayable unless shared controls are intentional and documented.
 
-## 13. Approval status
+## 14. Approval status
 
 Package validation and teacher approval are separate steps.
 
@@ -381,7 +471,7 @@ Package validation and teacher approval are separate steps.
 
 Students should be able to submit packages for review. They should not be able to publish directly to the arcade menu.
 
-## 14. Adapter expectations
+## 15. Adapter expectations
 
 The first adapter is the browser game adapter. It should:
 

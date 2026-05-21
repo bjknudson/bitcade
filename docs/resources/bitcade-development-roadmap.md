@@ -107,7 +107,69 @@ Implementation notes:
 
 Outcome: Bitcade can handle keyboard and controller-based cabinet setups more reliably.
 
-## Phase 5: Student publishing workflow
+## Phase 5: High scores and leaderboards
+
+Add:
+
+- Optional high-score support per game.
+- Runtime score submission bridge for browser games.
+- Native score event capture for Python/Pygame games.
+- Database tables for stored score entries.
+- Per-game leaderboard display.
+- Leaderboard index page that lists approved games with score-enabled boards.
+- User tag prompt after a qualifying score.
+- Admin moderation for inappropriate tags or suspicious entries.
+
+Implementation notes:
+
+- Keep high scores opt-in. A game must declare scoring metadata in
+  `bitcade.json`, including whether higher or lower values rank better, the
+  score label, display unit, precision, and whether ties prefer the earliest
+  score.
+- Scope every leaderboard to one game, and to one game version when the game
+  declares a version. Do not rank scores across different games because score
+  meanings are not standardized. Do not automatically mix scores across versions
+  when gameplay balance, timing, scoring, or difficulty changed.
+- Provide platform-specific guide sections that show each game type how to send
+  a final score to Bitcade:
+  - Browser games should call a small Bitcade JavaScript helper or send a
+    structured `postMessage` score event to the launcher.
+  - Python/Pygame games should print a structured score event to stdout with a
+    clear Bitcade prefix so the native adapter can capture it without parsing
+    arbitrary game logs.
+  - Scratch and other wrapped browser exports need a wrapper-specific guide. If
+    the exported game cannot report its score, Bitcade should not pretend to
+    track verified high scores for it.
+- Record score submissions against the current play session when possible. If a
+  score event arrives after the session has ended, keep the session association
+  when the launcher can still identify it.
+- Prompt for a short player tag only after Bitcade determines the score qualifies
+  for storage. Supported prompt locations should be:
+  - In game, when the game collects the tag and sends it with the score.
+  - Overlaid by the browser launcher after a browser score event.
+  - After exit, when a native game or browser game reports a final score but did
+    not collect a tag itself.
+- Normalize tags to a short classroom-safe format, such as 3 to 12 visible
+  characters, and store only the tag, not student identity.
+- Reject or hide empty, abusive, or duplicate-spam tags through admin
+  moderation. The first build can use a manual hide/delete workflow instead of
+  automated filtering.
+- Store both the numeric sort value and the display string supplied by the game.
+  The database should rank by the normalized numeric value only within the same
+  game and version, then render the display string in UI.
+- Show leaderboards in three places:
+  - On each game detail page, show the top entries for that game.
+  - In the post-game screen, show the player's new rank and nearby scores.
+  - On a Leaderboards index page, show one board at a time with filters for
+    game, version, time period, and scoring mode.
+- Keep the leaderboard local-first. It should work without internet access and
+  live in the existing SQLite database under `/var/lib/bitcade`.
+
+Outcome: approved games can report high scores to Bitcade, Bitcade can prompt
+for a player tag at the right moment, and local leaderboards can be shown per
+game and version across the arcade.
+
+## Phase 6: Student publishing workflow
 
 Add:
 
@@ -120,7 +182,7 @@ Add:
 
 Outcome: students can package and submit games with clearer feedback while teachers retain approval control.
 
-## Phase 6: Adapter system
+## Phase 7: Adapter system
 
 Add future adapters only after the browser and Python/Pygame workflows are stable:
 
@@ -138,5 +200,6 @@ The following ideas are useful later but should not be first-build requirements:
 - Processing first-class support.
 - Media project gallery mode.
 - Nginx or reverse proxy setup.
-- Complex analytics beyond `play_count` and `last_played`.
+- Complex analytics beyond `play_count`, `last_played`, and high-score
+  leaderboards.
 - Automatic thumbnail generation.
