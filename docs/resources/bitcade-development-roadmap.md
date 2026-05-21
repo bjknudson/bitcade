@@ -79,6 +79,8 @@ Outcome: approved Python/Pygame projects can be uploaded, approved, and launched
 
 ## Phase 4: Better input support
 
+Status: complete (May 21, 2026).
+
 Add:
 
 - Controller detection.
