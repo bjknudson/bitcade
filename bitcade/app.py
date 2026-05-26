@@ -1070,12 +1070,19 @@ class BitcadeApp:
 
     def install_profile_exports(self) -> dict[str, str]:
         profile = self.install_profile()
+        export_profile = json.loads(json.dumps(profile))
+        cabinet_profile = self.cabinet_profile()
+        export_profile["cabinetProfile"] = cabinet_profile
         display = profile.get("display", {}) if isinstance(profile.get("display"), dict) else {}
         viewport = display.get("safeViewport", {}) if isinstance(display.get("safeViewport"), dict) else {}
         controls = profile.get("gameControls", {}) if isinstance(profile.get("gameControls"), dict) else {}
         player1 = controls.get("player1", {}) if isinstance(controls.get("player1"), dict) else {}
         system = controls.get("system", {}) if isinstance(controls.get("system"), dict) else {}
         exit_to_menu = system.get("exitToMenu", {}) if isinstance(system.get("exitToMenu"), dict) else {}
+        cabinet_players = cabinet_profile.get("players", {}) if isinstance(cabinet_profile.get("players"), dict) else {}
+        cabinet_system = cabinet_profile.get("system", {}) if isinstance(cabinet_profile.get("system"), dict) else {}
+        cabinet_p1 = cabinet_players.get("1", {}) if isinstance(cabinet_players.get("1"), dict) else {}
+        cabinet_p2 = cabinet_players.get("2", {}) if isinstance(cabinet_players.get("2"), dict) else {}
         width = int(viewport.get("width") or DEFAULT_DISPLAY_WIDTH)
         height = int(viewport.get("height") or DEFAULT_DISPLAY_HEIGHT)
         exit_keys = exit_to_menu.get("keys", ["Escape"])
@@ -1084,12 +1091,27 @@ class BitcadeApp:
         hold_seconds = exit_to_menu.get("holdSeconds", 3)
         action = player1.get("a", "Space")
         start = player1.get("start", "Enter")
+        cabinet_combo = cabinet_system.get("menuCombo", "button:8+button:9")
+        cabinet_hold = cabinet_system.get("holdSeconds", hold_seconds)
+
+        def binding_summary(bindings: dict[str, Any]) -> str:
+            pairs = [
+                f"{control}={binding}"
+                for control, binding in bindings.items()
+                if str(binding).strip()
+            ]
+            return ", ".join(pairs) if pairs else "not configured"
+
         markdown = "\n".join(
             [
                 f"Bitcade target viewport: {width}x{height}",
                 "Menu controls: Arrow keys move focus; Space or Enter selects.",
                 f"Player 1 controls: Arrow keys move; {action} is the main action; {start} starts/selects.",
                 f"Exit behavior: hold {' + '.join(str(key) for key in exit_keys)} for {hold_seconds} seconds to return to the Bitcade menu.",
+                f"Cabinet profile: {cabinet_profile.get('name', 'Default gamepad')}",
+                f"Player 1 cabinet bindings: {binding_summary(cabinet_p1)}",
+                f"Player 2 cabinet bindings: {binding_summary(cabinet_p2)}",
+                f"Cabinet exit/menu combo: hold {cabinet_combo} for {cabinet_hold} seconds.",
                 "Timing rule: use delta time or viewport-scaled movement so resizing does not change gameplay speed.",
             ]
         )
@@ -1097,11 +1119,14 @@ class BitcadeApp:
             f"Build this game for a Bitcade install with a {width}x{height} safe gameplay viewport. "
             f"Use Arrow keys for movement, {action} for the main action, {start} for start/select, "
             f"and {' + '.join(str(key) for key in exit_keys)} held for {hold_seconds} seconds to exit back to the Bitcade menu. "
+            f"The saved cabinet profile is {cabinet_profile.get('name', 'Default gamepad')}: "
+            f"Player 1 bindings are {binding_summary(cabinet_p1)}; Player 2 bindings are {binding_summary(cabinet_p2)}; "
+            f"the cabinet exit/menu combo is {cabinet_combo} held for {cabinet_hold} seconds. "
             "Keep gameplay speed independent of resolution by using delta time or scaling movement from the viewport size. "
             "Do not rely on Tab for gameplay."
         )
         return {
-            "json": json.dumps(profile, indent=2),
+            "json": json.dumps(export_profile, indent=2),
             "markdown": markdown,
             "prompt": prompt,
         }
@@ -2078,9 +2103,9 @@ class BitcadeApp:
         install_command = "pnpm " + " ".join(install_args)
         build_args = [resolved_pnpm, "--filter", package_name, "run", "build"] if package_name else [resolved_pnpm, "run", "build"]
         build_command = (
-            f"PORT=${{PORT}} BASE_PATH=/ pnpm --filter {package_name} run build"
+            f"PORT=${{PORT}} BASE_PATH=./ pnpm --filter {package_name} run build"
             if package_name
-            else "PORT=${PORT} BASE_PATH=/ pnpm run build"
+            else "PORT=${PORT} BASE_PATH=./ pnpm run build"
         )
 
         try:
@@ -2091,7 +2116,7 @@ class BitcadeApp:
             self.run_logged_command([resolved_pnpm, "approve-builds", "--all"], workspace_root, approve_builds_log)
             self.run_logged_command([resolved_pnpm, *install_args], workspace_root, install_log)
         build_cwd = workspace_root if package_name else artifact["path"]
-        self.run_logged_command(build_args, build_cwd, build_log, env_updates={"PORT": str(port), "BASE_PATH": "/"})
+        self.run_logged_command(build_args, build_cwd, build_log, env_updates={"PORT": str(port), "BASE_PATH": "./"})
         shutil.copy2(install_log, workspace_root / "install.log")
         if approve_builds_log.exists():
             shutil.copy2(approve_builds_log, workspace_root / "approve-builds.log")

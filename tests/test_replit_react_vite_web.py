@@ -118,7 +118,7 @@ class ReplitReactViteWebTests(unittest.TestCase):
             entry="artifacts/rocket-league-2d/dist/public/index.html",
             public_dir="artifacts/rocket-league-2d/dist/public",
             install_command="pnpm install --frozen-lockfile",
-            build_command="PORT=${PORT} BASE_PATH=/ pnpm --filter @workspace/rocket-league-2d run build",
+            build_command="PORT=${PORT} BASE_PATH=./ pnpm --filter @workspace/rocket-league-2d run build",
         )
 
         self.assertEqual(detected["platform"], REPLIT_REACT_VITE_WEB_PLATFORM)
@@ -136,11 +136,11 @@ class ReplitReactViteWebTests(unittest.TestCase):
             entry="artifacts/rocket-league-2d/dist/public/index.html",
             public_dir="artifacts/rocket-league-2d/dist/public",
             install_command="pnpm install --frozen-lockfile",
-            build_command=f"PORT=${{PORT}} BASE_PATH=/ pnpm --filter {artifact['packageName']} run build",
+            build_command=f"PORT=${{PORT}} BASE_PATH=./ pnpm --filter {artifact['packageName']} run build",
         )
 
         self.assertEqual(artifact["packageName"], "@workspace/rocket-league-2d")
-        self.assertIn("pnpm --filter @workspace/rocket-league-2d run build", metadata["runtime"]["buildCommand"])
+        self.assertIn("BASE_PATH=./ pnpm --filter @workspace/rocket-league-2d run build", metadata["runtime"]["buildCommand"])
 
     def test_prefer_web_artifact(self) -> None:
         workspace = self.make_workspace(include_api=True)
@@ -512,6 +512,29 @@ class ReplitReactViteWebTests(unittest.TestCase):
 
         profile = self.app.cabinet_profile()
         self.assertEqual(profile["system"]["menuCombo"], "axis:0:++button:9")
+
+    def test_install_profile_exports_include_cabinet_profile(self) -> None:
+        form = {
+            "profile_name": ["Classroom cabinet"],
+            "hold_seconds": ["2.5"],
+            "menu_combo": ["button:8+button:9"],
+            "p1_up": ["axis:1:-"],
+            "p1_a": ["button:0"],
+            "p2_left": ["axis:0:-"],
+            "p2_b": ["button:1"],
+        }
+        self.app.update_input_settings(form)
+
+        exports = self.app.install_profile_exports()
+        exported_json = json.loads(exports["json"])
+
+        self.assertEqual(exported_json["cabinetProfile"]["name"], "Classroom cabinet")
+        self.assertEqual(exported_json["cabinetProfile"]["players"]["1"]["a"], "button:0")
+        self.assertEqual(exported_json["cabinetProfile"]["players"]["2"]["b"], "button:1")
+        self.assertIn("Player 1 cabinet bindings", exports["markdown"])
+        self.assertIn("a=button:0", exports["markdown"])
+        self.assertIn("Player 2 bindings are", exports["prompt"])
+        self.assertIn("button:8+button:9", exports["prompt"])
 
     def test_upload_multipart_parser_returns_package_stream(self) -> None:
         boundary = "bitcade-test-boundary"

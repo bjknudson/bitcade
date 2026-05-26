@@ -31,3 +31,7 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# JavaScript build output
+node_modules/
+dist/
