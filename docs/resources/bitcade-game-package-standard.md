@@ -316,6 +316,9 @@ brief can say:
 Target Bitcade install: 1900x1080 safe viewport. Menu uses Arrow keys and
 Space/Enter. Player 1 uses Arrow keys, Space, Shift, and Enter. Escape held for
 3 seconds exits to the Bitcade menu. Use delta time or viewport-scaled movement.
+If the game has a final score, add `scores` metadata to `bitcade.json`, update
+`version` whenever score balance changes, and submit exactly one final score
+event at the end of a run.
 ```
 
 This copied profile is not a replacement for `bitcade.json`; it is a starting
@@ -324,11 +327,12 @@ contract that helps the game match the machine before upload.
 ## 11. High-score reporting
 
 High scores are optional. A game that wants Bitcade leaderboards must declare a
-`scores` object and submit score events through the platform-specific Bitcade
-runtime bridge. Scores are ranked only against entries for the same game, and
-against the same game version when `version` is declared. Bitcade should not
-compare scores across different games because there is no cross-game scoring
-standard.
+top-level `scores` object in `bitcade.json` and submit score events through the
+platform-specific Bitcade runtime bridge. Bitcade shows the resulting
+leaderboard on that game's detail page below the game information and launch
+buttons. Scores are ranked only against entries for the same game, and against
+the same game version when `version` is declared. Bitcade should not compare
+scores across different games because there is no cross-game scoring standard.
 
 Recommended `scores` fields:
 
@@ -340,6 +344,22 @@ Recommended `scores` fields:
 | `scores.unit` | string | Optional unit such as `points`, `seconds`, `meters`, or `waves`. |
 | `scores.precision` | integer | Number of decimal places to show when Bitcade formats the score. |
 | `scores.ties` | string | `earliest` or `latest`; first build should prefer `earliest`. |
+
+Example top-level metadata:
+
+```json
+{
+  "version": "1.0.0",
+  "scores": {
+    "enabled": true,
+    "label": "Score",
+    "order": "desc",
+    "unit": "points",
+    "precision": 0,
+    "ties": "earliest"
+  }
+}
+```
 
 Use `version` when an update changes score balance, difficulty, timing,
 available lives, enemy behavior, level layout, scoring formulas, or any other
@@ -358,8 +378,22 @@ Score submissions should include:
 | `tag` | Optional short player tag if the game collected one itself. |
 | `metadata` | Optional JSON-safe details such as level, wave, mode, or difficulty. |
 
-Browser games should report scores with a Bitcade JavaScript helper when one is
-available, or by sending a structured message to the launcher:
+Browser games should report scores with Bitcade's helper script when possible:
+
+```html
+<script src="/static/bitcade-score.js"></script>
+```
+
+```javascript
+window.Bitcade.submitScore({
+  score: 1250,
+  display: "1,250",
+  player: 1,
+  metadata: { level: 4 }
+});
+```
+
+If the helper is not available, send a structured message to the launcher:
 
 ```javascript
 window.parent.postMessage(
@@ -392,6 +426,10 @@ Bitcade should prompt for a player tag only when a score qualifies for storage.
 The tag prompt can happen in the game, as a launcher overlay, or after exit. If
 the game supplies `tag`, Bitcade may skip the prompt after validating the tag.
 Tags should be short public handles, not student names or accounts.
+
+Send one final score event per run, not a score every frame. If the game can
+restart internally without returning to Bitcade, submit only the final result
+for each completed run.
 
 Scratch, TurboWarp, and other wrapped browser exports need format-specific
 instructions because the generated player controls what JavaScript can run. If

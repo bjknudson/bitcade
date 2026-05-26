@@ -25,3 +25,14 @@ function draw() {
   textAlign(CENTER);
   text("Replace sketch.js with your game code", width / 2, height - 24);
 }
+
+// If you enable scores.enabled in bitcade.json, call this once when a run ends.
+// Make sure /static/bitcade-score.js is loaded from index.html on Bitcade.
+function submitFinalScore(finalScore) {
+  if (!window.Bitcade) return;
+  window.Bitcade.submitScore({
+    score: finalScore,
+    display: String(finalScore),
+    player: 1
+  });
+}

@@ -12,12 +12,15 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import zipfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from hashlib import pbkdf2_hmac, sha256
 from http.cookies import SimpleCookie
 from io import BytesIO
 from pathlib import Path, PurePosixPath
+from secrets import token_urlsafe
 from time import time
 from typing import Any, BinaryIO
 from urllib.parse import parse_qs, quote, unquote
@@ -96,6 +99,12 @@ SESSION_SECONDS = 8 * 60 * 60
 VIRTUAL_CONTROLS = ("up", "down", "left", "right", "a", "b", "start")
 DISPLAY_SCALING_MODES = {"fullscreen", "fit", "integer-fit", "fixed"}
 SPEED_MODELS = {"delta-time", "viewport-scaled", "fixed-pixels"}
+SCORE_ORDERS = {"asc", "desc"}
+SCORE_TIES = {"earliest", "latest"}
+SCORE_SOURCES = {"game", "overlay", "after_exit", "admin"}
+MAX_LEADERBOARD_ENTRIES = 10
+MAX_PENDING_SCORE_AGE_SECONDS = 15 * 60
+TAG_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,10}[A-Za-z0-9]$")
 DEFAULT_DISPLAY_WIDTH = 1900
 DEFAULT_DISPLAY_HEIGHT = 1080
 KEY_OPTIONS = (
@@ -238,6 +247,7 @@ CREATE TABLE IF NOT EXISTS games (
   description TEXT NOT NULL,
   license TEXT NOT NULL,
   credits TEXT NOT NULL,
+  version TEXT,
   thumbnail_path TEXT,
   entry_path TEXT NOT NULL DEFAULT 'index.html',
   status TEXT NOT NULL DEFAULT 'pending',
@@ -255,11 +265,21 @@ CREATE TABLE IF NOT EXISTS games (
   approved_at TEXT,
   play_count INTEGER NOT NULL DEFAULT 0,
   last_played TEXT,
+  scores_enabled INTEGER NOT NULL DEFAULT 0,
+  score_label TEXT NOT NULL DEFAULT 'Score',
+  score_order TEXT NOT NULL DEFAULT 'desc',
+  score_unit TEXT,
+  score_precision INTEGER NOT NULL DEFAULT 0,
+  score_ties TEXT NOT NULL DEFAULT 'earliest',
   CHECK (status IN ('pending', 'approved', 'hidden', 'archived')),
   CHECK (min_players >= 1),
   CHECK (max_players >= min_players),
   CHECK (display_scaling IN ('fullscreen', 'fit', 'integer-fit', 'fixed')),
-  CHECK (speed_model IN ('delta-time', 'viewport-scaled', 'fixed-pixels'))
+  CHECK (speed_model IN ('delta-time', 'viewport-scaled', 'fixed-pixels')),
+  CHECK (scores_enabled IN (0, 1)),
+  CHECK (score_order IN ('asc', 'desc')),
+  CHECK (score_precision >= 0),
+  CHECK (score_ties IN ('earliest', 'latest'))
 );
 
 CREATE TABLE IF NOT EXISTS files (
@@ -280,6 +300,31 @@ CREATE TABLE IF NOT EXISTS play_sessions (
   FOREIGN KEY (game_id) REFERENCES games(id) ON DELETE CASCADE,
   CHECK (exit_reason IN ('menu', 'timeout', 'crash', 'unknown'))
 );
+
+CREATE TABLE IF NOT EXISTS high_scores (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  game_id TEXT NOT NULL,
+  game_version TEXT,
+  play_session_id INTEGER,
+  player_tag TEXT NOT NULL,
+  score_value REAL NOT NULL,
+  score_display TEXT NOT NULL,
+  player_slot INTEGER,
+  source TEXT NOT NULL DEFAULT 'game',
+  metadata TEXT NOT NULL DEFAULT '{}',
+  achieved_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  hidden_at TEXT,
+  hidden_reason TEXT,
+  FOREIGN KEY (game_id) REFERENCES games(id) ON DELETE CASCADE,
+  FOREIGN KEY (play_session_id) REFERENCES play_sessions(id) ON DELETE SET NULL,
+  CHECK (length(player_tag) BETWEEN 1 AND 12),
+  CHECK (source IN ('game', 'overlay', 'after_exit', 'admin')),
+  CHECK (player_slot IS NULL OR player_slot >= 1)
+);
+
+CREATE INDEX IF NOT EXISTS idx_high_scores_game_rank
+  ON high_scores(game_id, game_version, hidden_at, score_value, achieved_at);
 
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
@@ -369,6 +414,95 @@ def validate_metadata(metadata: dict[str, Any], game_dir: Path) -> None:
             raise ValueError(f"{game_dir} has unsupported display scaling")
         if str(display.get("speedModel", "delta-time")) not in SPEED_MODELS:
             raise ValueError(f"{game_dir} has unsupported speed model")
+    normalize_score_metadata(metadata, game_dir)
+
+
+def normalize_score_metadata(metadata: dict[str, Any], game_dir: Path | None = None) -> dict[str, Any]:
+    scores = metadata.get("scores", {})
+    if scores in ({}, None):
+        return {
+            "enabled": False,
+            "label": "Score",
+            "order": "desc",
+            "unit": "",
+            "precision": 0,
+            "ties": "earliest",
+        }
+    if not isinstance(scores, dict):
+        location = f"{game_dir} " if game_dir is not None else ""
+        raise ValueError(f"{location}score metadata must be an object")
+    enabled = bool(scores.get("enabled", False))
+    label = str(scores.get("label") or "Score").strip()
+    order = str(scores.get("order") or "desc").strip().lower()
+    unit = str(scores.get("unit") or "").strip()
+    ties = str(scores.get("ties") or "earliest").strip().lower()
+    try:
+        precision = int(scores.get("precision", 0) or 0)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Score precision must be a whole number.") from error
+    if enabled and not label:
+        raise ValueError("Score label is required when leaderboards are enabled.")
+    if order not in SCORE_ORDERS:
+        raise ValueError("Score order must be asc or desc.")
+    if ties not in SCORE_TIES:
+        raise ValueError("Score ties must be earliest or latest.")
+    if precision < 0 or precision > 6:
+        raise ValueError("Score precision must be between 0 and 6.")
+    if len(label) > 32:
+        raise ValueError("Score label must be 32 characters or fewer.")
+    if len(unit) > 24:
+        raise ValueError("Score unit must be 24 characters or fewer.")
+    return {
+        "enabled": enabled,
+        "label": label or "Score",
+        "order": order,
+        "unit": unit,
+        "precision": precision,
+        "ties": ties,
+    }
+
+
+def normalize_player_tag(tag: str) -> str:
+    normalized = re.sub(r"\s+", " ", tag.strip())
+    if len(normalized) < 1 or len(normalized) > 12 or not TAG_PATTERN.fullmatch(normalized):
+        raise ValueError("Player tag must be 1 to 12 characters and use letters, numbers, spaces, dashes, underscores, or periods.")
+    return normalized
+
+
+def parse_score_payload(data: dict[str, Any]) -> dict[str, Any]:
+    try:
+        score_value = float(data["score"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("Score submission must include a numeric score.") from error
+    if score_value != score_value or score_value in {float("inf"), float("-inf")}:
+        raise ValueError("Score must be a finite number.")
+    display = str(data.get("display") or "").strip()
+    if not display:
+        display = str(int(score_value)) if score_value.is_integer() else str(score_value)
+    if len(display) > 64:
+        raise ValueError("Score display value is too long.")
+    player = data.get("player")
+    player_slot = None
+    if player not in (None, ""):
+        try:
+            player_slot = int(player)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Player number must be a whole number.") from error
+        if player_slot < 1:
+            raise ValueError("Player number must be 1 or greater.")
+    metadata = data.get("metadata", {})
+    if metadata in (None, ""):
+        metadata = {}
+    if not isinstance(metadata, dict):
+        raise ValueError("Score metadata must be an object.")
+    json.dumps(metadata)
+    return {
+        "score_value": score_value,
+        "score_display": display,
+        "player_slot": player_slot,
+        "tag": str(data.get("tag") or "").strip(),
+        "metadata": metadata,
+    }
 
 
 def validate_package_files_for_platform(game_dir: Path, metadata: dict[str, Any]) -> None:
@@ -558,7 +692,7 @@ def html_page(title: str, body: str, *, body_class: str = "", show_chrome: bool 
     header = f"""
   <header class="topbar">
     <a class="brand" href="/play">{logo}{brand_label}</a>
-    <nav><a href="/play">Play</a><a href="/student">Student Upload</a><a href="/admin">Admin</a></nav>
+    <nav><a href="/play">Play</a><a href="/leaderboards">Leaderboards</a><a href="/student">Student Upload</a><a href="/admin">Admin</a></nav>
   </header>""" if show_chrome else ""
     css_vars = css_variable_block(branding)
     site_title = str((branding or {}).get("site_title") or install_name)
@@ -938,11 +1072,19 @@ class BitcadeApp:
         for path in (self.data_dir, self.games_dir, self.uploads_dir, self.thumbnails_dir, self.branding_dir, self.logs_dir):
             path.mkdir(parents=True, exist_ok=True)
 
-    def connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def connect(self):
         conn = sqlite3.connect(self.database)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def init_db(self) -> None:
         with self.connect() as conn:
@@ -953,11 +1095,18 @@ class BitcadeApp:
     def migrate_db(self, conn: sqlite3.Connection) -> None:
         game_columns = {row["name"] for row in conn.execute("PRAGMA table_info(games)").fetchall()}
         migrations = {
+            "version": "ALTER TABLE games ADD COLUMN version TEXT",
             "thumbnail_path": "ALTER TABLE games ADD COLUMN thumbnail_path TEXT",
             "display_width": "ALTER TABLE games ADD COLUMN display_width INTEGER",
             "display_height": "ALTER TABLE games ADD COLUMN display_height INTEGER",
             "display_scaling": "ALTER TABLE games ADD COLUMN display_scaling TEXT NOT NULL DEFAULT 'fit'",
             "speed_model": "ALTER TABLE games ADD COLUMN speed_model TEXT NOT NULL DEFAULT 'delta-time'",
+            "scores_enabled": "ALTER TABLE games ADD COLUMN scores_enabled INTEGER NOT NULL DEFAULT 0",
+            "score_label": "ALTER TABLE games ADD COLUMN score_label TEXT NOT NULL DEFAULT 'Score'",
+            "score_order": "ALTER TABLE games ADD COLUMN score_order TEXT NOT NULL DEFAULT 'desc'",
+            "score_unit": "ALTER TABLE games ADD COLUMN score_unit TEXT",
+            "score_precision": "ALTER TABLE games ADD COLUMN score_precision INTEGER NOT NULL DEFAULT 0",
+            "score_ties": "ALTER TABLE games ADD COLUMN score_ties TEXT NOT NULL DEFAULT 'earliest'",
         }
         for column, statement in migrations.items():
             if column not in game_columns:
@@ -1030,6 +1179,8 @@ class BitcadeApp:
                 "Scale positions, collision bounds, and speed from the viewport size.",
                 "Use elapsed time or delta time for movement instead of fixed pixels per frame.",
                 "Do not use Tab as an in-game action because Bitcade/browser focus may use it.",
+                "If the game has scoring, add a top-level scores object to bitcade.json, update version when score balance changes, and submit exactly one final score event at the end of each run.",
+                "Browser games can load /static/bitcade-score.js on Bitcade and call window.Bitcade.submitScore; Python/Pygame games can print one BITCADE_SCORE JSON line to stdout.",
             ],
         }
 
@@ -1113,6 +1264,9 @@ class BitcadeApp:
                 f"Player 2 cabinet bindings: {binding_summary(cabinet_p2)}",
                 f"Cabinet exit/menu combo: hold {cabinet_combo} for {cabinet_hold} seconds.",
                 "Timing rule: use delta time or viewport-scaled movement so resizing does not change gameplay speed.",
+                "Leaderboard rule: if the game has scoring, include top-level bitcade.json scores metadata, update version when scoring changes, and submit exactly one final score event per completed run.",
+                "Browser score helper: load /static/bitcade-score.js on Bitcade and call window.Bitcade.submitScore({score, display, player, metadata}).",
+                "Python/Pygame score helper: print BITCADE_SCORE plus JSON with score, display, player, and optional metadata, using flush=True.",
             ]
         )
         prompt = (
@@ -1123,7 +1277,10 @@ class BitcadeApp:
             f"Player 1 bindings are {binding_summary(cabinet_p1)}; Player 2 bindings are {binding_summary(cabinet_p2)}; "
             f"the cabinet exit/menu combo is {cabinet_combo} held for {cabinet_hold} seconds. "
             "Keep gameplay speed independent of resolution by using delta time or scaling movement from the viewport size. "
-            "Do not rely on Tab for gameplay."
+            "Do not rely on Tab for gameplay. "
+            "If the game has scoring, add Bitcade leaderboard support: include a top-level scores object in bitcade.json, keep a meaningful version and update it when scoring balance changes, and submit exactly one final score event per completed run. "
+            "For browser games, load /static/bitcade-score.js on Bitcade and call window.Bitcade.submitScore({score, display, player, metadata}); for Python/Pygame games, print one BITCADE_SCORE JSON line to stdout with flush=True. "
+            "Do not submit scores every frame."
         )
         return {
             "json": json.dumps(export_profile, indent=2),
@@ -1159,14 +1316,16 @@ class BitcadeApp:
         players = metadata["players"]
         input_meta = metadata["input"]
         display_meta = metadata.get("display", {}) if isinstance(metadata.get("display", {}), dict) else {}
+        score_meta = normalize_score_metadata(metadata)
         conn.execute(
             """
             INSERT INTO games (
-              id, title, authors, platform, description, license, credits, thumbnail_path, entry_path, status,
+              id, title, authors, platform, description, license, credits, version, thumbnail_path, entry_path, status,
               min_players, max_players, simultaneous, requires_keyboard, requires_mouse,
               supports_gamepad, display_width, display_height, display_scaling, speed_model,
-              uploaded_at, approved_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              uploaded_at, approved_at, scores_enabled, score_label, score_order, score_unit,
+              score_precision, score_ties
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 game_id,
@@ -1176,6 +1335,7 @@ class BitcadeApp:
                 metadata["description"],
                 metadata["license"],
                 json.dumps(metadata["credits"]),
+                str(metadata.get("version") or "").strip() or None,
                 thumbnail_path,
                 metadata["entry"],
                 status,
@@ -1191,6 +1351,12 @@ class BitcadeApp:
                 str(display_meta.get("speedModel", "delta-time")),
                 now,
                 now if status == "approved" else None,
+                int(score_meta["enabled"]),
+                score_meta["label"],
+                score_meta["order"],
+                score_meta["unit"] or None,
+                score_meta["precision"],
+                score_meta["ties"],
             ),
         )
         for file_path in sorted(path for path in game_dir.rglob("*") if path.is_file()):
@@ -1215,6 +1381,9 @@ class BitcadeApp:
             response_headers.extend(headers)
         start_response(status, response_headers)
         return [body]
+
+    def json_response(self, start_response, status: str, payload: dict[str, Any]):
+        return self.response(start_response, status, json.dumps(payload).encode("utf-8"), "application/json")
 
     def redirect(self, start_response, location: str, headers: list[tuple[str, str]] | None = None):
         response_headers = [("Location", location), ("Content-Length", "0")]
@@ -1315,6 +1484,12 @@ class BitcadeApp:
             return self.handle_post(environ, start_response, path)
         if path == "/play":
             return self.response(start_response, "200 OK", self.render_play())
+        if path == "/leaderboards":
+            query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+            return self.response(start_response, "200 OK", self.render_leaderboards(first_form_value(query, "game")))
+        if path == "/scores/pending":
+            query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+            return self.handle_pending_score_status(start_response, first_form_value(query, "gameId"))
         if path.startswith("/play/") and path.endswith("/launch"):
             game_id = safe_url_path(path.removeprefix("/play/").removesuffix("/launch"))
             return self.launch_game(start_response, game_id)
@@ -1384,6 +1559,9 @@ class BitcadeApp:
         if path == "/admin":
             query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
             return self.response(start_response, "200 OK", self.render_admin(first_form_value(query, "message"), first_form_value(query, "level", "info")))
+        if path == "/admin/scores":
+            query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+            return self.response(start_response, "200 OK", self.render_admin_scores(first_form_value(query, "message"), first_form_value(query, "level", "info"), first_form_value(query, "game")))
         if path == "/admin/input":
             query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
             return self.response(start_response, "200 OK", self.render_input_settings(first_form_value(query, "message"), first_form_value(query, "level", "info")))
@@ -1406,6 +1584,8 @@ class BitcadeApp:
 
     def handle_post(self, environ, start_response, path: str):
         try:
+            if path == "/scores/submit":
+                return self.handle_score_submit(environ, start_response)
             if path == "/admin/login":
                 return self.handle_login(environ, start_response)
             if path.startswith("/admin"):
@@ -1436,6 +1616,11 @@ class BitcadeApp:
                 deleted_count = self.delete_games(form.get("selected_game", []))
                 game_word = "game" if deleted_count == 1 else "games"
                 return self.redirect_admin(start_response, f"Deleted {deleted_count} {game_word}.")
+            if path.startswith("/admin/scores/") and path.endswith("/moderate"):
+                score_id = int(safe_url_path(path.removeprefix("/admin/scores/").removesuffix("/moderate")))
+                form = self.parse_urlencoded(environ)
+                self.moderate_score(score_id, first_form_value(form, "action"), first_form_value(form, "hidden_reason"))
+                return self.redirect(start_response, "/admin/scores?message=Score%20updated.")
             if path.startswith("/admin/games/") and path.endswith("/status"):
                 game_id = safe_url_path(path.removeprefix("/admin/games/").removesuffix("/status"))
                 form = self.parse_urlencoded(environ)
@@ -1457,6 +1642,8 @@ class BitcadeApp:
             return self.not_found(start_response)
         except ValueError as error:
             print(f"Bitcade handled request error on {path}: {error}", file=sys.stderr, flush=True)
+            if path == "/scores/submit":
+                return self.json_response(start_response, "400 Bad Request", {"ok": False, "error": str(error)})
             if path == "/admin/login":
                 return self.redirect(start_response, f"/admin/login?message={quote(str(error))}&level=error")
             if path == "/admin/change-password":
@@ -1480,6 +1667,20 @@ class BitcadeApp:
             raise ValueError("Submitted form is too large.")
         body = environ["wsgi.input"].read(length).decode("utf-8")
         return parse_qs(body, keep_blank_values=True)
+
+    def parse_json_body(self, environ) -> dict[str, Any]:
+        length = int(environ.get("CONTENT_LENGTH") or 0)
+        if length <= 0:
+            raise ValueError("Request body is empty.")
+        if length > 64 * 1024:
+            raise ValueError("JSON request is too large.")
+        try:
+            data = json.loads(environ["wsgi.input"].read(length).decode("utf-8"))
+        except json.JSONDecodeError as error:
+            raise ValueError("Request body must be valid JSON.") from error
+        if not isinstance(data, dict):
+            raise ValueError("JSON request body must be an object.")
+        return data
 
     def current_screen_code(self, offset: int = 0) -> str:
         window = int(time() // 120) + offset
@@ -1552,6 +1753,80 @@ class BitcadeApp:
             start_response,
             f"/student?message={quote(f'Submitted {game_id} for teacher approval.')}&level=info&preview={quote(game_id)}&token={quote(preview_token)}",
         )
+
+    def handle_score_submit(self, environ, start_response):
+        data = self.parse_json_body(environ)
+        token = str(data.get("token") or "").strip()
+        with self.connect() as conn:
+            if token:
+                pending = self.take_pending_score(conn, token)
+                game = conn.execute("SELECT * FROM games WHERE id = ? AND status = 'approved'", (pending["game_id"],)).fetchone()
+                if game is None:
+                    raise ValueError("Game not found.")
+                result = self.record_score(
+                    conn,
+                    game,
+                    pending["score"],
+                    player_tag=str(data.get("tag") or ""),
+                    source=str(pending.get("source") or "overlay"),
+                    play_session_id=pending.get("play_session_id"),
+                    achieved_at=str(pending.get("achieved_at") or utc_now()),
+                )
+                if result.get("stored"):
+                    self.delete_pending_score(conn, token)
+                return self.json_response(start_response, "200 OK", {"ok": True, **result})
+
+            game_id = safe_url_path(str(data.get("gameId") or ""))
+            if not game_id:
+                raise ValueError("Score submission is missing a game ID.")
+            game = conn.execute("SELECT * FROM games WHERE id = ? AND status = 'approved'", (game_id,)).fetchone()
+            if game is None:
+                raise ValueError("Game not found.")
+            score = parse_score_payload(data)
+            play_session_id = None
+            if data.get("sessionId") not in (None, ""):
+                try:
+                    play_session_id = int(data.get("sessionId"))
+                except (TypeError, ValueError) as error:
+                    raise ValueError("Session ID must be a number.") from error
+            achieved_at = utc_now()
+            tag = score.pop("tag")
+            if tag:
+                result = self.record_score(
+                    conn,
+                    game,
+                    score,
+                    player_tag=tag,
+                    source="game",
+                    play_session_id=play_session_id,
+                    achieved_at=achieved_at,
+                )
+                return self.json_response(start_response, "200 OK", {"ok": True, **result})
+            if not self.score_qualifies(conn, game, float(score["score_value"]), achieved_at):
+                return self.json_response(start_response, "200 OK", {"ok": True, "stored": False, "qualified": False})
+            pending_token = self.create_pending_score(
+                conn,
+                {
+                    "game_id": game_id,
+                    "play_session_id": play_session_id,
+                    "score": score,
+                    "source": "overlay",
+                    "achieved_at": achieved_at,
+                },
+            )
+            return self.json_response(
+                start_response,
+                "200 OK",
+                {
+                    "ok": True,
+                    "stored": False,
+                    "qualified": True,
+                    "requiresTag": True,
+                    "token": pending_token,
+                    "scoreDisplay": score["score_display"],
+                    "label": game["score_label"],
+                },
+            )
 
     def receive_uploaded_package(self, environ, *, require_code: bool = False) -> str:
         content_length = int(environ.get("CONTENT_LENGTH") or 0)
@@ -2684,6 +2959,7 @@ class BitcadeApp:
         description = first_form_value(form, "description").strip()
         license_text = first_form_value(form, "license").strip()
         credits = json_list_from_text(first_form_value(form, "credits"))
+        version = first_form_value(form, "version").strip() or None
         entry = safe_package_path(first_form_value(form, "entry").strip() or "index.html")
         min_players = int(first_form_value(form, "min_players", "1") or "1")
         max_players = int(first_form_value(form, "max_players", "1") or "1")
@@ -2711,6 +2987,18 @@ class BitcadeApp:
             raise ValueError("Unsupported display scaling.")
         if speed_model not in SPEED_MODELS:
             raise ValueError("Unsupported speed model.")
+        score_meta = normalize_score_metadata(
+            {
+                "scores": {
+                    "enabled": bool_from_form(form, "scores_enabled"),
+                    "label": first_form_value(form, "score_label", "Score"),
+                    "order": first_form_value(form, "score_order", "desc"),
+                    "unit": first_form_value(form, "score_unit", ""),
+                    "precision": first_form_value(form, "score_precision", "0"),
+                    "ties": first_form_value(form, "score_ties", "earliest"),
+                }
+            }
+        )
         with self.connect() as conn:
             game = conn.execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
             if game is None:
@@ -2726,6 +3014,7 @@ class BitcadeApp:
                     "description": description,
                     "license": license_text,
                     "credits": credits,
+                    "version": version,
                     "players": {
                         "min": min_players,
                         "max": max_players,
@@ -2738,6 +3027,7 @@ class BitcadeApp:
                         "scaling": display_scaling,
                         "speedModel": speed_model,
                     },
+                    "scores": score_meta,
                 }
             )
             validate_metadata(metadata, game_dir)
@@ -2749,10 +3039,11 @@ class BitcadeApp:
                 """
                 UPDATE games
                 SET title = ?, authors = ?, platform = ?, description = ?, license = ?, credits = ?,
-                    entry_path = ?, min_players = ?, max_players = ?, simultaneous = ?,
+                    version = ?, entry_path = ?, min_players = ?, max_players = ?, simultaneous = ?,
                     requires_keyboard = ?, requires_mouse = ?, supports_gamepad = ?,
                     display_width = ?, display_height = ?, display_scaling = ?, speed_model = ?,
-                    thumbnail_path = ?
+                    thumbnail_path = ?, scores_enabled = ?, score_label = ?, score_order = ?,
+                    score_unit = ?, score_precision = ?, score_ties = ?
                 WHERE id = ?
                 """,
                 (
@@ -2762,6 +3053,7 @@ class BitcadeApp:
                     description,
                     license_text,
                     json.dumps(credits),
+                    version,
                     entry,
                     min_players,
                     max_players,
@@ -2774,9 +3066,459 @@ class BitcadeApp:
                     display_scaling,
                     speed_model,
                     thumbnail_path,
+                    int(score_meta["enabled"]),
+                    score_meta["label"],
+                    score_meta["order"],
+                    score_meta["unit"] or None,
+                    score_meta["precision"],
+                    score_meta["ties"],
                     game_id,
                 ),
             )
+
+    def score_version(self, game: sqlite3.Row | dict[str, Any]) -> str | None:
+        if isinstance(game, sqlite3.Row):
+            keys = set(game.keys())
+            raw_version = game["version"] if "version" in keys else None
+        else:
+            raw_version = game.get("version")
+        version = str(raw_version or "").strip()
+        return version or None
+
+    def score_where_version(self, version: str | None) -> tuple[str, tuple[Any, ...]]:
+        if version is None:
+            return "game_version IS NULL", ()
+        return "game_version = ?", (version,)
+
+    def visible_scores_for_game(self, conn: sqlite3.Connection, game_id: str, version: str | None) -> list[dict[str, Any]]:
+        version_clause, version_params = self.score_where_version(version)
+        rows = conn.execute(
+            f"""
+            SELECT * FROM high_scores
+            WHERE game_id = ? AND {version_clause} AND hidden_at IS NULL
+            """,
+            (game_id, *version_params),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def sort_score_entries(self, entries: list[dict[str, Any]], game: sqlite3.Row | dict[str, Any]) -> list[dict[str, Any]]:
+        reverse_score = str(game["score_order"]) == "desc"
+        latest_ties = str(game["score_ties"]) == "latest"
+
+        def key(entry: dict[str, Any]) -> tuple[float, str, int]:
+            score_value = float(entry["score_value"])
+            primary = -score_value if reverse_score else score_value
+            achieved = str(entry.get("achieved_at") or "")
+            tie_time = "".join(chr(255 - ord(ch)) for ch in achieved) if latest_ties else achieved
+            return (primary, tie_time, int(entry.get("id") or 0))
+
+        return sorted(entries, key=key)
+
+    def ranked_scores_for_game(self, conn: sqlite3.Connection, game: sqlite3.Row | dict[str, Any], *, include_hidden: bool = False, limit: int | None = None) -> list[dict[str, Any]]:
+        version = self.score_version(game)
+        version_clause, version_params = self.score_where_version(version)
+        hidden_clause = "" if include_hidden else "AND hidden_at IS NULL"
+        rows = conn.execute(
+            f"""
+            SELECT * FROM high_scores
+            WHERE game_id = ? AND {version_clause} {hidden_clause}
+            """,
+            (game["id"], *version_params),
+        ).fetchall()
+        ranked = self.sort_score_entries([dict(row) for row in rows], game)
+        for index, entry in enumerate(ranked, start=1):
+            entry["rank"] = index
+        return ranked[:limit] if limit is not None else ranked
+
+    def score_qualifies(self, conn: sqlite3.Connection, game: sqlite3.Row | dict[str, Any], score_value: float, achieved_at: str | None = None) -> bool:
+        existing = self.visible_scores_for_game(conn, str(game["id"]), self.score_version(game))
+        if len(existing) < MAX_LEADERBOARD_ENTRIES:
+            return True
+        candidate = {
+            "id": 0,
+            "score_value": score_value,
+            "achieved_at": achieved_at or utc_now(),
+        }
+        ranked = self.sort_score_entries([*existing, candidate], game)
+        return ranked.index(candidate) < MAX_LEADERBOARD_ENTRIES
+
+    def pending_score_key(self, token: str) -> str:
+        return f"pending_score:{token}"
+
+    def cleanup_pending_scores(self, conn: sqlite3.Connection) -> None:
+        now = time()
+        rows = conn.execute("SELECT key, value FROM settings WHERE key LIKE 'pending_score:%'").fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["value"])
+                created_at = float(payload.get("created_at", 0))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                created_at = 0
+            if now - created_at > MAX_PENDING_SCORE_AGE_SECONDS:
+                conn.execute("DELETE FROM settings WHERE key = ?", (row["key"],))
+
+    def create_pending_score(self, conn: sqlite3.Connection, payload: dict[str, Any]) -> str:
+        self.cleanup_pending_scores(conn)
+        token = token_urlsafe(18)
+        payload = {**payload, "created_at": time()}
+        conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (self.pending_score_key(token), json.dumps(payload)))
+        return token
+
+    def take_pending_score(self, conn: sqlite3.Connection, token: str) -> dict[str, Any]:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (self.pending_score_key(token),)).fetchone()
+        if row is None:
+            raise ValueError("Score prompt expired. Submit the score again.")
+        try:
+            payload = json.loads(row["value"])
+        except json.JSONDecodeError as error:
+            raise ValueError("Score prompt is invalid.") from error
+        if time() - float(payload.get("created_at", 0)) > MAX_PENDING_SCORE_AGE_SECONDS:
+            conn.execute("DELETE FROM settings WHERE key = ?", (self.pending_score_key(token),))
+            raise ValueError("Score prompt expired. Submit the score again.")
+        return payload
+
+    def delete_pending_score(self, conn: sqlite3.Connection, token: str) -> None:
+        conn.execute("DELETE FROM settings WHERE key = ?", (self.pending_score_key(token),))
+
+    def record_score(
+        self,
+        conn: sqlite3.Connection,
+        game: sqlite3.Row | dict[str, Any],
+        score: dict[str, Any],
+        *,
+        player_tag: str,
+        source: str,
+        play_session_id: int | None = None,
+        achieved_at: str | None = None,
+    ) -> dict[str, Any]:
+        if not int(game["scores_enabled"]):
+            raise ValueError("This game does not have leaderboards enabled.")
+        if source not in SCORE_SOURCES:
+            raise ValueError("Invalid score source.")
+        tag = normalize_player_tag(player_tag)
+        if play_session_id is not None:
+            session = conn.execute("SELECT game_id FROM play_sessions WHERE id = ?", (play_session_id,)).fetchone()
+            if session is None or str(session["game_id"]) != str(game["id"]):
+                play_session_id = None
+        achieved = achieved_at or utc_now()
+        if not self.score_qualifies(conn, game, float(score["score_value"]), achieved):
+            return {"stored": False, "qualified": False}
+        cursor = conn.execute(
+            """
+            INSERT INTO high_scores (
+              game_id, game_version, play_session_id, player_tag, score_value,
+              score_display, player_slot, source, metadata, achieved_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                game["id"],
+                self.score_version(game),
+                play_session_id,
+                tag,
+                float(score["score_value"]),
+                score["score_display"],
+                score["player_slot"],
+                source,
+                json.dumps(score["metadata"]),
+                achieved,
+                utc_now(),
+            ),
+        )
+        ranked = self.ranked_scores_for_game(conn, game)
+        new_rank = next((entry["rank"] for entry in ranked if entry["id"] == cursor.lastrowid), None)
+        return {"stored": True, "qualified": True, "id": cursor.lastrowid, "rank": new_rank}
+
+    def handle_pending_score_status(self, start_response, game_id: str):
+        safe_game_id = safe_url_path(game_id)
+        with self.connect() as conn:
+            self.cleanup_pending_scores(conn)
+            game = conn.execute("SELECT * FROM games WHERE id = ? AND status = 'approved'", (safe_game_id,)).fetchone()
+            if game is None:
+                return self.json_response(start_response, "404 Not Found", {"ok": False, "error": "Game not found."})
+            rows = conn.execute("SELECT key, value FROM settings WHERE key LIKE 'pending_score:%'").fetchall()
+            matches = []
+            for row in rows:
+                try:
+                    payload = json.loads(row["value"])
+                except json.JSONDecodeError:
+                    continue
+                if payload.get("game_id") != safe_game_id:
+                    continue
+                token = str(row["key"]).removeprefix("pending_score:")
+                matches.append((float(payload.get("created_at", 0)), token, payload))
+            if not matches:
+                return self.json_response(start_response, "200 OK", {"ok": True, "pending": False})
+            _, token, payload = sorted(matches, reverse=True)[0]
+            score = payload.get("score", {}) if isinstance(payload.get("score"), dict) else {}
+            return self.json_response(
+                start_response,
+                "200 OK",
+                {
+                    "ok": True,
+                    "pending": True,
+                    "token": token,
+                    "scoreDisplay": score.get("score_display", ""),
+                    "label": game["score_label"],
+                },
+            )
+
+    def tag_prompt_script(self) -> str:
+        return """
+        <script>
+        window.BitcadeScorePrompt = window.BitcadeScorePrompt || ((details) => {
+          const root = document.getElementById("score-prompt-root") || document.body;
+          if (document.getElementById("bitcade-score-overlay")) return;
+          const overlay = document.createElement("div");
+          overlay.id = "bitcade-score-overlay";
+          overlay.className = "score-overlay";
+          overlay.innerHTML = `
+            <form class="score-dialog">
+              <p class="eyebrow">New leaderboard score</p>
+              <h1>${details.label || "Score"} ${details.scoreDisplay || ""}</h1>
+              <label>Player tag <input name="tag" maxlength="12" autocomplete="off" required autofocus></label>
+              <p class="score-error" aria-live="polite"></p>
+              <div class="form-actions">
+                <button class="button" type="submit">Save score</button>
+                <button class="button secondary" type="button" data-dismiss>Skip</button>
+              </div>
+            </form>`;
+          root.appendChild(overlay);
+          const form = overlay.querySelector("form");
+          const error = overlay.querySelector(".score-error");
+          const close = () => overlay.remove();
+          overlay.querySelector("[data-dismiss]").addEventListener("click", close);
+          form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            error.textContent = "";
+            const tag = new FormData(form).get("tag");
+            const response = await fetch("/scores/submit", {
+              method: "POST",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({token: details.token, tag})
+            });
+            const result = await response.json();
+            if (!result.ok || !result.stored) {
+              error.textContent = result.error || "Score was not saved.";
+              return;
+            }
+            form.innerHTML = `
+              <p class="eyebrow">Saved</p>
+              <h1>Rank #${result.rank || "?"}</h1>
+              <div class="form-actions">
+                <a class="button" href="/leaderboards?game=${encodeURIComponent(details.gameId || "")}">View leaderboard</a>
+                <button class="button secondary" type="button" data-dismiss>Close</button>
+              </div>`;
+            form.querySelector("[data-dismiss]").addEventListener("click", close);
+          });
+        });
+        </script>
+        """
+
+    def score_bridge_script(self, game: dict[str, Any], play_session_id: int | None) -> str:
+        if not int(game.get("scores_enabled") or 0):
+            return ""
+        game_id = json.dumps(game["id"])
+        session_id = json.dumps(play_session_id)
+        return f"""
+        <div id="score-prompt-root"></div>
+        {self.tag_prompt_script()}
+        <script>
+        (() => {{
+          const frame = document.getElementById("bitcade-game-frame");
+          if (!frame) return;
+          window.Bitcade = {{
+            submitScore(score) {{
+              return window.postMessage({{type: "bitcade:score", ...score}}, window.location.origin);
+            }}
+          }};
+          window.addEventListener("message", async (event) => {{
+            if (event.origin !== window.location.origin || event.source !== frame.contentWindow) return;
+            const data = event.data || {{}};
+            if (data.type !== "bitcade:score") return;
+            const response = await fetch("/scores/submit", {{
+              method: "POST",
+              headers: {{"Content-Type": "application/json"}},
+              body: JSON.stringify({{...data, gameId: {game_id}, sessionId: {session_id}}})
+            }});
+            const result = await response.json();
+            if (result.requiresTag) {{
+              window.BitcadeScorePrompt({{...result, gameId: {game_id}}});
+            }}
+          }});
+        }})();
+        </script>
+        """
+
+    def native_pending_score_script(self, game: dict[str, Any]) -> str:
+        if not int(game.get("scores_enabled") or 0):
+            return ""
+        game_id = json.dumps(game["id"])
+        return f"""
+        {self.tag_prompt_script()}
+        <script>
+        (() => {{
+          const gameId = {game_id};
+          const seen = new Set();
+          const poll = async () => {{
+            try {{
+              const response = await fetch(`/scores/pending?gameId=${{encodeURIComponent(gameId)}}`);
+              const result = await response.json();
+              if (result.pending && result.token && !seen.has(result.token)) {{
+                seen.add(result.token);
+                window.BitcadeScorePrompt({{...result, gameId}});
+              }}
+            }} catch (error) {{}}
+            window.setTimeout(poll, 2000);
+          }};
+          poll();
+        }})();
+        </script>
+        """
+
+    def capture_native_output(self, game_id: str, process: subprocess.Popen[Any], log_path: Path, play_session_id: int | None) -> None:
+        try:
+            with log_path.open("a", encoding="utf-8", errors="replace") as log_file:
+                if process.stdout is not None:
+                    for line in process.stdout:
+                        text = line if isinstance(line, str) else line.decode("utf-8", errors="replace")
+                        log_file.write(text)
+                        log_file.flush()
+                        self.capture_native_score_line(game_id, text.strip(), play_session_id)
+                return_code = process.wait()
+                log_file.write(f"\n[Bitcade] Process exited with code {return_code}\n")
+        finally:
+            with self.connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE play_sessions
+                    SET ended_at = ?, exit_reason = CASE WHEN ? = 0 THEN 'menu' ELSE 'crash' END
+                    WHERE id = ? AND ended_at IS NULL
+                    """,
+                    (utc_now(), process.returncode or 0, play_session_id),
+                )
+
+    def capture_native_score_line(self, game_id: str, line: str, play_session_id: int | None) -> None:
+        if not line.startswith("BITCADE_SCORE "):
+            return
+        try:
+            data = json.loads(line.removeprefix("BITCADE_SCORE ").strip())
+            if not isinstance(data, dict):
+                raise ValueError("native score line must contain an object")
+            score = parse_score_payload(data)
+            tag = score.pop("tag")
+            with self.connect() as conn:
+                game = conn.execute("SELECT * FROM games WHERE id = ? AND status = 'approved'", (game_id,)).fetchone()
+                if game is None or not int(game["scores_enabled"]):
+                    return
+                achieved_at = utc_now()
+                if tag:
+                    self.record_score(
+                        conn,
+                        game,
+                        score,
+                        player_tag=tag,
+                        source="game",
+                        play_session_id=play_session_id,
+                        achieved_at=achieved_at,
+                    )
+                elif self.score_qualifies(conn, game, float(score["score_value"]), achieved_at):
+                    self.create_pending_score(
+                        conn,
+                        {
+                            "game_id": game_id,
+                            "play_session_id": play_session_id,
+                            "score": score,
+                            "source": "after_exit",
+                            "achieved_at": achieved_at,
+                        },
+                    )
+        except Exception as error:
+            with self.logs_dir.joinpath(f"{game_id}.log").open("a", encoding="utf-8", errors="replace") as log_file:
+                log_file.write(f"[Bitcade] Ignored invalid score event: {error}\n")
+
+    def render_score_table(self, game: dict[str, Any] | sqlite3.Row, scores: list[dict[str, Any]]) -> str:
+        label = html.escape(str(game["score_label"] or "Score"))
+        rows = []
+        for entry in scores:
+            rows.append(
+                f"""
+                <tr>
+                  <td>#{entry['rank']}</td>
+                  <td>{html.escape(entry['player_tag'])}</td>
+                  <td>{html.escape(entry['score_display'])}</td>
+                  <td>{html.escape(str(entry.get('achieved_at') or ''))}</td>
+                </tr>
+                """
+            )
+        return f"""
+        <table class="admin-table leaderboard-table">
+          <thead><tr><th>Rank</th><th>Tag</th><th>{label}</th><th>When</th></tr></thead>
+          <tbody>{''.join(rows) or '<tr><td colspan="4">No scores yet.</td></tr>'}</tbody>
+        </table>
+        """
+
+    def render_game_leaderboard_panel(self, game: dict[str, Any]) -> str:
+        if not int(game.get("scores_enabled") or 0):
+            return ""
+        with self.connect() as conn:
+            scores = self.ranked_scores_for_game(conn, game, limit=MAX_LEADERBOARD_ENTRIES)
+        version = html.escape(str(game.get("version") or "default"))
+        return f"""
+        <section class="panel leaderboard-panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Leaderboard</p>
+              <h2>{html.escape(str(game.get('score_label') or 'Score'))}</h2>
+              <p>Version: {version}</p>
+            </div>
+          </div>
+          {self.render_score_table(game, scores)}
+        </section>
+        """
+
+    def render_leaderboards(self, selected_game_id: str = "") -> bytes:
+        safe_selected = safe_url_path(selected_game_id) if selected_game_id else ""
+        with self.connect() as conn:
+            games = self.rows_to_games(
+                conn.execute(
+                    "SELECT * FROM games WHERE status = 'approved' AND scores_enabled = 1 ORDER BY title COLLATE NOCASE"
+                ).fetchall()
+            )
+            selected = next((game for game in games if game["id"] == safe_selected), games[0] if games else None)
+            scores = self.ranked_scores_for_game(conn, selected, limit=MAX_LEADERBOARD_ENTRIES) if selected else []
+        options = "".join(
+            f'<option value="{html.escape(game["id"])}"{" selected" if selected and selected["id"] == game["id"] else ""}>{html.escape(game["title"])}</option>'
+            for game in games
+        )
+        if selected:
+            board = f"""
+            <section class="panel">
+              <div class="section-heading">
+                <div>
+                  <p class="eyebrow">Top {MAX_LEADERBOARD_ENTRIES}</p>
+                  <h2>{html.escape(selected['title'])}</h2>
+                  <p>{html.escape(str(selected.get('version') or 'default version'))} · {html.escape(str(selected.get('score_order') or 'desc'))}</p>
+                </div>
+              </div>
+              {self.render_score_table(selected, scores)}
+            </section>
+            """
+        else:
+            board = '<p class="empty">No approved games have leaderboards enabled yet.</p>'
+        body = f"""
+        <section class="hero compact">
+          <p class="eyebrow">Phase 5</p>
+          <h1>Leaderboards</h1>
+          <p>Local high scores are scoped per game and version.</p>
+        </section>
+        <form class="panel form-grid" method="get" action="/leaderboards">
+          <label>Game <select name="game">{options}</select></label>
+          <button class="button" type="submit">Show board</button>
+          <a class="button secondary" href="/play">Back to games</a>
+        </form>
+        {board}
+        """
+        return self.html_page("Leaderboards", body)
 
     def render_play(self) -> bytes:
         with self.connect() as conn:
@@ -2876,6 +3618,7 @@ class BitcadeApp:
             </div>
           </div>
         </section>
+        {self.render_game_leaderboard_panel(game)}
         """
         return self.response(start_response, "200 OK", self.html_page(f"{game['title']} Info", body))
 
@@ -2886,18 +3629,20 @@ class BitcadeApp:
                 return self.not_found(start_response)
             now = utc_now()
             conn.execute("UPDATE games SET play_count = play_count + 1, last_played = ? WHERE id = ?", (now, game_id))
-            conn.execute("INSERT INTO play_sessions (game_id, started_at) VALUES (?, ?)", (game_id, now))
+            session_cursor = conn.execute("INSERT INTO play_sessions (game_id, started_at) VALUES (?, ?)", (game_id, now))
+            play_session_id = session_cursor.lastrowid
             game = dict(game)
         if game["platform"] == PYTHON_GAME_PLATFORM:
-            return self.launch_native_python_game(start_response, game, "/play")
+            return self.launch_native_python_game(start_response, game, "/play", play_session_id=play_session_id)
         metadata = read_metadata(self.games_dir / game_id)
         body = f"""
         <section class="game-shell" aria-label="Now playing {html.escape(game['title'])}">
-          <iframe class="game-frame" title="{html.escape(game['title'])}" src="/game-files/{html.escape(game_id)}/{html.escape(game['entry_path'])}" tabindex="0" allowfullscreen></iframe>
+          <iframe id="bitcade-game-frame" class="game-frame" title="{html.escape(game['title'])}" src="/game-files/{html.escape(game_id)}/{html.escape(game['entry_path'])}" tabindex="0" allowfullscreen></iframe>
           <a class="game-return button secondary small" href="/play">Menu</a>
         </section>
         {GAME_FIT_SCRIPT}
         {game_input_script(self.cabinet_profile(), metadata.get("controls", {}), "/play")}
+        {self.score_bridge_script(game, play_session_id)}
         """
         return self.response(start_response, "200 OK", self.html_page(f"Playing {game['title']}", body, body_class="game-page", show_chrome=False))
 
@@ -2944,7 +3689,7 @@ class BitcadeApp:
         """
         return self.response(start_response, "200 OK", self.html_page(f"Previewing {game['title']}", body, body_class="game-page", show_chrome=False))
 
-    def launch_native_python_game(self, start_response, game: dict[str, Any], return_path: str, preview: bool = False):
+    def launch_native_python_game(self, start_response, game: dict[str, Any], return_path: str, preview: bool = False, play_session_id: int | None = None):
         game_id = str(game["id"])
         existing = self.running_native_games.get(game_id)
         if existing is not None and existing.poll() is None:
@@ -2959,15 +3704,21 @@ class BitcadeApp:
             env.setdefault("SDL_VIDEO_CENTERED", "1")
             env.setdefault("PYTHONUNBUFFERED", "1")
             try:
-                with log_path.open("ab") as log_file:
-                    process = subprocess.Popen(
-                        [self.python_game_bin, str(entry_path)],
-                        cwd=game_dir,
-                        env=env,
-                        stdout=log_file,
-                        stderr=subprocess.STDOUT,
-                        close_fds=True,
-                    )
+                process = subprocess.Popen(
+                    [self.python_game_bin, str(entry_path)],
+                    cwd=game_dir,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    close_fds=True,
+                )
+                threading.Thread(
+                    target=self.capture_native_output,
+                    args=(game_id, process, log_path, play_session_id),
+                    daemon=True,
+                ).start()
             except OSError as error:
                 body = f"""
                 <section class="native-launch">
@@ -2986,8 +3737,10 @@ class BitcadeApp:
           <h1>{html.escape(game['title'])}</h1>
           <p>{html.escape(status_text)} as a local Python/Pygame process on the Bitcade display.</p>
           <p>When the game exits, use the menu button to return to Bitcade.</p>
+          <div id="score-prompt-root"></div>
           <a class="button" href="{html.escape(return_path)}" data-nav-start>Return</a>
         </section>
+        {self.native_pending_score_script(game) if not preview else ""}
         """
         return self.response(start_response, "200 OK", self.html_page(f"Playing {game['title']}", body, body_class="game-page native-page", show_chrome=False))
 
@@ -3317,7 +4070,7 @@ class BitcadeApp:
           <p class="eyebrow">Phase 2 admin</p>
           <h1>Manage games</h1>
           <p>Upload a Bitcade zip, validate it, preview it, then approve it for the arcade menu.</p>
-          <p><a href="/admin/branding">Branding</a> · <a href="/admin/input">Input settings</a> · <a href="/admin/change-password">Change password</a> · <a href="/admin/logout">Log out</a></p>
+          <p><a href="/admin/branding">Branding</a> · <a href="/admin/input">Input settings</a> · <a href="/admin/scores">Score moderation</a> · <a href="/admin/change-password">Change password</a> · <a href="/admin/logout">Log out</a></p>
         </section>
         {alert}
         <section class="panel">
@@ -3344,6 +4097,77 @@ class BitcadeApp:
         </div>
         """
         return self.html_page("Admin", body)
+
+    def render_admin_scores(self, message: str = "", level: str = "info", selected_game_id: str = "") -> bytes:
+        safe_selected = safe_url_path(selected_game_id) if selected_game_id else ""
+        with self.connect() as conn:
+            games = self.rows_to_games(conn.execute("SELECT * FROM games WHERE scores_enabled = 1 ORDER BY title COLLATE NOCASE").fetchall())
+            selected = next((game for game in games if game["id"] == safe_selected), games[0] if games else None)
+            entries = self.ranked_scores_for_game(conn, selected, include_hidden=True) if selected else []
+        alert = f'<p class="notice {html.escape(level)}">{html.escape(message)}</p>' if message else ""
+        options = "".join(
+            f'<option value="{html.escape(game["id"])}"{" selected" if selected and selected["id"] == game["id"] else ""}>{html.escape(game["title"])}</option>'
+            for game in games
+        )
+        rows = []
+        for entry in entries:
+            hidden = bool(entry.get("hidden_at"))
+            action = "restore" if hidden else "hide"
+            button_label = "Restore" if hidden else "Hide"
+            rows.append(
+                f"""
+                <tr>
+                  <td>#{entry['rank']}</td>
+                  <td>{html.escape(entry['player_tag'])}</td>
+                  <td>{html.escape(entry['score_display'])}</td>
+                  <td>{html.escape(str(entry.get('source') or ''))}</td>
+                  <td>{html.escape(str(entry.get('hidden_at') or 'Visible'))}</td>
+                  <td>
+                    <form class="inline-form" action="/admin/scores/{entry['id']}/moderate" method="post">
+                      <input type="hidden" name="action" value="{action}">
+                      <input name="hidden_reason" placeholder="Reason" value="{html.escape(str(entry.get('hidden_reason') or ''))}">
+                      <button class="button secondary small" type="submit">{button_label}</button>
+                    </form>
+                  </td>
+                </tr>
+                """
+            )
+        body = f"""
+        <section class="hero compact">
+          <p class="eyebrow">Phase 5 admin</p>
+          <h1>Score moderation</h1>
+          <p>Hide suspicious or inappropriate local leaderboard entries without deleting the game.</p>
+          <p><a href="/admin">Back to admin</a></p>
+        </section>
+        {alert}
+        <form class="panel form-grid" method="get" action="/admin/scores">
+          <label>Game <select name="game">{options}</select></label>
+          <button class="button" type="submit">Show entries</button>
+        </form>
+        <table class="admin-table">
+          <thead><tr><th>Rank</th><th>Tag</th><th>Score</th><th>Source</th><th>Status</th><th>Action</th></tr></thead>
+          <tbody>{''.join(rows) or '<tr><td colspan="6">No score entries yet.</td></tr>'}</tbody>
+        </table>
+        """
+        return self.html_page("Score Moderation", body)
+
+    def moderate_score(self, score_id: int, action: str, reason: str = "") -> None:
+        if action not in {"hide", "restore"}:
+            raise ValueError("Invalid moderation action.")
+        with self.connect() as conn:
+            score = conn.execute("SELECT 1 FROM high_scores WHERE id = ?", (score_id,)).fetchone()
+            if score is None:
+                raise ValueError("Score entry not found.")
+            if action == "hide":
+                conn.execute(
+                    "UPDATE high_scores SET hidden_at = ?, hidden_reason = ? WHERE id = ?",
+                    (utc_now(), reason.strip() or "Hidden by admin", score_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE high_scores SET hidden_at = NULL, hidden_reason = NULL WHERE id = ?",
+                    (score_id,),
+                )
 
     def render_input_settings(self, message: str = "", level: str = "info") -> bytes:
         alert = f'<p class="notice {html.escape(level)}">{html.escape(message)}</p>' if message else ""
@@ -3967,6 +4791,16 @@ class BitcadeApp:
             f'<option value="{html.escape(model)}"{" selected" if model == speed_model else ""}>{html.escape(model)}</option>'
             for model in sorted(SPEED_MODELS)
         )
+        score_order = game.get("score_order") or "desc"
+        score_ties = game.get("score_ties") or "earliest"
+        score_order_options = "".join(
+            f'<option value="{order}"{" selected" if order == score_order else ""}>{order}</option>'
+            for order in ("desc", "asc")
+        )
+        score_tie_options = "".join(
+            f'<option value="{tie}"{" selected" if tie == score_ties else ""}>{tie}</option>'
+            for tie in ("earliest", "latest")
+        )
         thumbnail_preview = self.render_thumbnail(game)
         body = f"""
         <section class="hero compact">
@@ -3986,6 +4820,7 @@ class BitcadeApp:
           <label>Entry file <input name="entry" value="{html.escape(game['entry_path'])}" required></label>
           <label>Description <textarea name="description" required>{html.escape(game['description'])}</textarea></label>
           <label>License <input name="license" value="{html.escape(game['license'])}" required></label>
+          <label>Version <input name="version" value="{html.escape(str(game.get('version') or ''))}" placeholder="Optional, separates leaderboards"></label>
           <label>Credits <textarea name="credits">{html.escape(chr(10).join(game['credits']))}</textarea></label>
           <div class="field-row">
             <label>Min players <input type="number" name="min_players" min="1" value="{game['min_players']}" required></label>
@@ -4005,6 +4840,21 @@ class BitcadeApp:
           <div class="field-row">
             <label>Scaling <select name="display_scaling">{scaling_options}</select></label>
             <label>Speed model <select name="speed_model">{speed_options}</select></label>
+          </div>
+          <h2>Leaderboards</h2>
+          <div class="checks">
+            <label><input type="checkbox" name="scores_enabled" {"checked" if game.get('scores_enabled') else ""}> Enable high scores</label>
+          </div>
+          <div class="field-row">
+            <label>Score label <input name="score_label" value="{html.escape(str(game.get('score_label') or 'Score'))}"></label>
+            <label>Order <select name="score_order">{score_order_options}</select></label>
+          </div>
+          <div class="field-row">
+            <label>Unit <input name="score_unit" value="{html.escape(str(game.get('score_unit') or ''))}" placeholder="points, seconds, waves"></label>
+            <label>Precision <input type="number" name="score_precision" min="0" max="6" value="{html.escape(str(game.get('score_precision') or 0))}"></label>
+          </div>
+          <div class="field-row">
+            <label>Tie behavior <select name="score_ties">{score_tie_options}</select></label>
           </div>
           <div class="form-actions">
             <button class="button" type="submit">Save metadata</button>

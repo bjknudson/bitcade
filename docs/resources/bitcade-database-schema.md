@@ -37,6 +37,8 @@ install settings that help students target the actual Bitcade machine.
 | `score_label` | Display label such as `Score`, `Time`, `Coins`, or `Distance`. |
 | `score_order` | `desc` when larger values are better, `asc` when smaller values are better. |
 | `score_unit` | Optional unit shown beside the score, such as `points`, `seconds`, or `meters`. |
+| `score_precision` | Decimal places to show when Bitcade formats score values. |
+| `score_ties` | Tie ordering rule, currently `earliest` or `latest`. |
 
 ## 2. `files`
 
@@ -134,13 +136,17 @@ CREATE TABLE games (
   score_label TEXT NOT NULL DEFAULT 'Score',
   score_order TEXT NOT NULL DEFAULT 'desc',
   score_unit TEXT,
+  score_precision INTEGER NOT NULL DEFAULT 0,
+  score_ties TEXT NOT NULL DEFAULT 'earliest',
   CHECK (status IN ('pending', 'approved', 'hidden', 'archived')),
   CHECK (min_players >= 1),
   CHECK (max_players >= min_players),
   CHECK (display_scaling IN ('fullscreen', 'fit', 'integer-fit', 'fixed')),
   CHECK (speed_model IN ('delta-time', 'viewport-scaled', 'fixed-pixels')),
   CHECK (scores_enabled IN (0, 1)),
-  CHECK (score_order IN ('asc', 'desc'))
+  CHECK (score_order IN ('asc', 'desc')),
+  CHECK (score_precision >= 0),
+  CHECK (score_ties IN ('earliest', 'latest'))
 );
 
 CREATE TABLE files (

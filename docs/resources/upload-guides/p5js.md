@@ -202,17 +202,36 @@ otherwise unfair to compare with older submissions.
 
 ```json
 {
-  "enabled": true,
-  "label": "Score",
-  "order": "desc",
-  "unit": "points",
-  "precision": 0,
-  "ties": "earliest"
+  "version": "1.0.0",
+  "scores": {
+    "enabled": true,
+    "label": "Score",
+    "order": "desc",
+    "unit": "points",
+    "precision": 0,
+    "ties": "earliest"
+  }
 }
 ```
 
-For browser games, report the score with the Bitcade JavaScript helper when one
-is available, or send a structured message to the launcher:
+For browser games, include Bitcade's helper and report the score once the run is
+over:
+
+```html
+<script src="/static/bitcade-score.js"></script>
+```
+
+```javascript
+function submitBitcadeScore(finalScore) {
+  window.Bitcade.submitScore({
+    score: finalScore,
+    display: String(finalScore),
+    player: 1
+  });
+}
+```
+
+If you cannot include the helper, send a structured message to the launcher:
 
 ```javascript
 function submitBitcadeScore(finalScore) {
@@ -230,7 +249,18 @@ function submitBitcadeScore(finalScore) {
 
 Do this once when the run is over, not every frame. If the game collects a tag
 itself, include `tag`; otherwise Bitcade should prompt for the tag as an
-overlay or after exit.
+overlay or after exit. The leaderboard for this game appears on the game detail
+page below the game information and launch/back buttons after scores are saved.
+
+When prompting an AI tool to build a p5.js game for Bitcade, include this
+requirement if the game has scoring:
+
+```text
+Add Bitcade leaderboard support. Include a top-level scores object in
+bitcade.json, include /static/bitcade-score.js in index.html, and call
+window.Bitcade.submitScore once when the run ends with score, display, player,
+and optional metadata. Do not submit scores every frame.
+```
 
 ## Step 6: Test offline
 
@@ -241,8 +271,12 @@ The game is ready when:
 - The canvas appears.
 - Keyboard or mouse input works.
 - Images and sounds load.
-- No browser console errors mention missing files.
+- No browser console errors mention missing package files. If you enabled
+  leaderboards and are opening the game outside Bitcade, `/static/bitcade-score.js`
+  may be unavailable until the package is served by Bitcade.
 - Any high-score event is sent only at the end of a run.
+- If leaderboards are enabled, `bitcade.json` includes `scores.enabled: true`
+  and a meaningful `version`.
 - The game still works with Wi-Fi turned off.
 
 ## Step 7: Create the zip for a complete package

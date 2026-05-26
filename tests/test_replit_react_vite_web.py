@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from io import BytesIO
+import sqlite3
 import tempfile
 import unittest
 import zipfile
@@ -535,6 +536,9 @@ class ReplitReactViteWebTests(unittest.TestCase):
         self.assertIn("a=button:0", exports["markdown"])
         self.assertIn("Player 2 bindings are", exports["prompt"])
         self.assertIn("button:8+button:9", exports["prompt"])
+        self.assertIn("Leaderboard rule", exports["markdown"])
+        self.assertIn("window.Bitcade.submitScore", exports["prompt"])
+        self.assertIn("BITCADE_SCORE", exports["json"])
 
     def test_upload_multipart_parser_returns_package_stream(self) -> None:
         boundary = "bitcade-test-boundary"
@@ -681,6 +685,195 @@ class ReplitReactViteWebTests(unittest.TestCase):
 
         self.assertEqual(self.app.branding()["logo_path"], "logo.png")
         self.assertEqual((self.app.branding_dir / "logo.png").read_bytes(), b"png-bytes")
+
+    def install_score_game(self, *, game_id: str = "score-test", order: str = "desc") -> None:
+        game_dir = self.app.games_dir / game_id
+        game_dir.mkdir(parents=True)
+        (game_dir / "index.html").write_text("<!doctype html><title>Score Test</title>", encoding="utf-8")
+        metadata = {
+            "title": "Score Test",
+            "authors": ["Tester"],
+            "platform": "html",
+            "entry": "index.html",
+            "description": "A score-enabled test game.",
+            "license": "Classroom use only",
+            "credits": [],
+            "version": "1.0",
+            "players": {"min": 1, "max": 1, "simultaneous": False},
+            "input": {"requiresKeyboard": True, "requiresMouse": False, "supportsGamepad": False},
+            "display": {"width": 800, "height": 600, "scaling": "fit", "speedModel": "delta-time"},
+            "controls": {"player1": {"up": "ArrowUp", "down": "ArrowDown", "left": "ArrowLeft", "right": "ArrowRight", "a": "Space", "b": "Shift", "start": "Enter"}},
+            "scores": {"enabled": True, "label": "Points", "order": order, "unit": "points", "precision": 0, "ties": "earliest"},
+        }
+        (game_dir / "bitcade.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        with self.app.connect() as conn:
+            self.app.add_game_record(conn, game_id, metadata, game_dir, status="approved")
+
+    def post_json(self, path: str, payload: dict[str, object]) -> tuple[dict[str, object], dict[str, object]]:
+        body = json.dumps(payload).encode("utf-8")
+        captured, start_response = self.start_response_capture()
+        response = self.app(
+            {
+                "REQUEST_METHOD": "POST",
+                "PATH_INFO": path,
+                "CONTENT_LENGTH": str(len(body)),
+                "CONTENT_TYPE": "application/json",
+                "wsgi.input": BytesIO(body),
+            },
+            start_response,
+        )
+        return captured, json.loads(b"".join(response).decode("utf-8"))
+
+    def test_score_metadata_is_stored_for_uploaded_games(self) -> None:
+        self.install_score_game(order="asc")
+
+        with self.app.connect() as conn:
+            game = conn.execute("SELECT * FROM games WHERE id = 'score-test'").fetchone()
+
+        self.assertEqual(game["version"], "1.0")
+        self.assertEqual(game["scores_enabled"], 1)
+        self.assertEqual(game["score_label"], "Points")
+        self.assertEqual(game["score_order"], "asc")
+        self.assertEqual(game["score_unit"], "points")
+
+    def test_score_submit_prompts_for_tag_then_records_ranked_entry(self) -> None:
+        self.install_score_game()
+
+        captured, first = self.post_json("/scores/submit", {"gameId": "score-test", "score": 1250, "display": "1,250"})
+        self.assertEqual(captured["status"], "200 OK")
+        self.assertTrue(first["requiresTag"])
+
+        _, second = self.post_json("/scores/submit", {"token": first["token"], "tag": "AAA"})
+        self.assertTrue(second["stored"])
+        self.assertEqual(second["rank"], 1)
+
+        with self.app.connect() as conn:
+            row = conn.execute("SELECT player_tag, score_value, game_version FROM high_scores").fetchone()
+        self.assertEqual(row["player_tag"], "AAA")
+        self.assertEqual(row["score_value"], 1250)
+        self.assertEqual(row["game_version"], "1.0")
+
+    def test_score_submit_rejects_invalid_tag(self) -> None:
+        self.install_score_game()
+
+        captured, result = self.post_json("/scores/submit", {"gameId": "score-test", "score": 50, "tag": "bad tag!"})
+
+        self.assertEqual(captured["status"], "400 Bad Request")
+        self.assertFalse(result["ok"])
+        self.assertIn("Player tag", result["error"])
+
+    def test_leaderboard_ranking_respects_score_order(self) -> None:
+        self.install_score_game(order="asc")
+        with self.app.connect() as conn:
+            game = conn.execute("SELECT * FROM games WHERE id = 'score-test'").fetchone()
+            self.app.record_score(conn, game, {"score_value": 30.0, "score_display": "30", "player_slot": None, "metadata": {}}, player_tag="SLOW", source="game")
+            self.app.record_score(conn, game, {"score_value": 10.0, "score_display": "10", "player_slot": None, "metadata": {}}, player_tag="FAST", source="game")
+            ranked = self.app.ranked_scores_for_game(conn, game)
+
+        self.assertEqual([entry["player_tag"] for entry in ranked], ["FAST", "SLOW"])
+
+    def test_score_moderation_hides_entries_from_public_board(self) -> None:
+        self.install_score_game()
+        with self.app.connect() as conn:
+            game = conn.execute("SELECT * FROM games WHERE id = 'score-test'").fetchone()
+            result = self.app.record_score(conn, game, {"score_value": 99.0, "score_display": "99", "player_slot": None, "metadata": {}}, player_tag="BAD", source="game")
+            score_id = int(result["id"])
+
+        self.app.moderate_score(score_id, "hide", "test")
+
+        with self.app.connect() as conn:
+            game = conn.execute("SELECT * FROM games WHERE id = 'score-test'").fetchone()
+            visible = self.app.ranked_scores_for_game(conn, game)
+            all_entries = self.app.ranked_scores_for_game(conn, game, include_hidden=True)
+
+        self.assertEqual(visible, [])
+        self.assertEqual(all_entries[0]["hidden_reason"], "test")
+
+    def test_game_info_page_shows_static_leaderboard_below_actions(self) -> None:
+        self.install_score_game()
+        with self.app.connect() as conn:
+            game = conn.execute("SELECT * FROM games WHERE id = 'score-test'").fetchone()
+            self.app.record_score(conn, game, {"score_value": 99.0, "score_display": "99", "player_slot": None, "metadata": {}}, player_tag="AAA", source="game")
+        captured, start_response = self.start_response_capture()
+
+        response = self.app.render_game_info(start_response, "score-test")
+        rendered = b"".join(response).decode("utf-8")
+
+        self.assertEqual(captured["status"], "200 OK")
+        self.assertLess(rendered.index("Launch game"), rendered.index("leaderboard-panel"))
+        self.assertIn("AAA", rendered)
+        self.assertNotIn("Full board", rendered)
+        self.assertNotIn('/leaderboards?game=score-test', rendered)
+
+    def test_database_migration_adds_score_columns_to_existing_games_table(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        data_dir = root / "data"
+        data_dir.mkdir()
+        database = data_dir / "bitcade.db"
+        with sqlite3.connect(database) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE games (
+                  id TEXT PRIMARY KEY,
+                  title TEXT NOT NULL,
+                  authors TEXT NOT NULL,
+                  platform TEXT NOT NULL,
+                  description TEXT NOT NULL,
+                  license TEXT NOT NULL,
+                  credits TEXT NOT NULL,
+                  thumbnail_path TEXT,
+                  entry_path TEXT NOT NULL DEFAULT 'index.html',
+                  status TEXT NOT NULL DEFAULT 'pending',
+                  min_players INTEGER NOT NULL DEFAULT 1,
+                  max_players INTEGER NOT NULL DEFAULT 1,
+                  simultaneous INTEGER NOT NULL DEFAULT 0,
+                  requires_keyboard INTEGER NOT NULL DEFAULT 1,
+                  requires_mouse INTEGER NOT NULL DEFAULT 0,
+                  supports_gamepad INTEGER NOT NULL DEFAULT 0,
+                  display_width INTEGER,
+                  display_height INTEGER,
+                  display_scaling TEXT NOT NULL DEFAULT 'fit',
+                  speed_model TEXT NOT NULL DEFAULT 'delta-time',
+                  uploaded_at TEXT NOT NULL,
+                  approved_at TEXT,
+                  play_count INTEGER NOT NULL DEFAULT 0,
+                  last_played TEXT
+                );
+                CREATE TABLE files (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  game_id TEXT NOT NULL,
+                  path TEXT NOT NULL,
+                  file_type TEXT NOT NULL,
+                  size INTEGER NOT NULL
+                );
+                CREATE TABLE play_sessions (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  game_id TEXT NOT NULL,
+                  started_at TEXT NOT NULL,
+                  ended_at TEXT,
+                  exit_reason TEXT NOT NULL DEFAULT 'unknown'
+                );
+                CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                """
+            )
+
+        migrated = BitcadeApp(
+            {
+                "BITCADE_DATA_DIR": str(data_dir),
+                "BITCADE_DATABASE": str(database),
+                "BITCADE_SEED_SAMPLES": False,
+            }
+        )
+
+        with migrated.connect() as conn:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(games)").fetchall()}
+            high_scores = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'high_scores'").fetchone()
+
+        self.assertIn("scores_enabled", columns)
+        self.assertIn("score_ties", columns)
+        self.assertIsNotNone(high_scores)
 
 
 if __name__ == "__main__":

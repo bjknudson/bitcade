@@ -71,6 +71,10 @@ p { color: var(--muted); font-size: 1.05rem; }
 .game-frame { display: block; width: 100vw; height: 100vh; border: 0; background: #000; }
 .game-return { position: fixed; top: 0.75rem; right: 0.75rem; z-index: 10; opacity: 0.72; }
 .game-return:is(:hover, :focus-visible) { opacity: 1; }
+.score-overlay { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 1rem; background: rgba(0, 0, 0, 0.72); }
+.score-dialog { display: grid; gap: 1rem; width: min(30rem, 100%); padding: 1.4rem; border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 1rem; background: var(--panel); box-shadow: 0 1.5rem 4rem rgba(0, 0, 0, 0.55); }
+.score-dialog h1 { font-size: clamp(2rem, 8vw, 4rem); }
+.score-error { min-height: 1.4rem; margin: 0; color: #ffd8d8; }
 .native-page { display: grid; place-items: center; }
 .native-launch { width: min(42rem, calc(100vw - 2rem)); padding: 2rem; text-align: center; }
 .native-launch h1 { font-size: clamp(2rem, 8vw, 5rem); }
@@ -129,6 +133,9 @@ textarea { min-height: 7rem; resize: vertical; }
 .checks label { display: flex; align-items: center; gap: 0.5rem; }
 .checks input { width: auto; }
 .form-actions { display: flex; gap: 0.8rem; flex-wrap: wrap; }
+.inline-form { display: flex; gap: 0.45rem; align-items: center; }
+.inline-form input { width: min(12rem, 100%); }
+.leaderboard-panel { max-width: 80rem; margin: 2rem auto 0; }
 @media (max-width: 820px) {
   .form-grid, .field-row, .game-info, .thumbnail-edit, .input-workspace { grid-template-columns: 1fr; }
   .actions { min-width: 0; }

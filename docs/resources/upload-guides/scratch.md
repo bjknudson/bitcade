@@ -116,6 +116,27 @@ the export cannot emit a score event, leave high scores disabled for that game.
 Bitcade should not ask for a player tag unless it has received a qualifying
 score.
 
+If a wrapper can emit a final score, add the same top-level `scores` object used
+by browser games:
+
+```json
+{
+  "version": "1.0.0",
+  "scores": {
+    "enabled": true,
+    "label": "Score",
+    "order": "desc",
+    "unit": "points",
+    "precision": 0,
+    "ties": "earliest"
+  }
+}
+```
+
+The wrapper should send one `bitcade:score` message at the end of a run, not
+continuous variable updates. After a score is saved, the leaderboard appears on
+the game detail page below the game information and launch/back buttons.
+
 Leaderboards are scoped to this Scratch game, not compared across games. Add or
 update the package `version` when a change makes scores easier, harder, faster,
 or otherwise unfair to compare with older submissions.

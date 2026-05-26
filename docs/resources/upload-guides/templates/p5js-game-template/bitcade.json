@@ -1,6 +1,7 @@
 {
   "title": "FILL IN: Game Title",
   "authors": ["FILL IN: Student Name"],
+  "version": "1.0.0",
   "platform": "p5js",
   "entry": "index.html",
   "description": "FILL IN: One or two sentences describing the game.",
@@ -25,6 +26,14 @@
     "height": 1080,
     "scaling": "fit",
     "speedModel": "delta-time"
+  },
+  "scores": {
+    "enabled": false,
+    "label": "Score",
+    "order": "desc",
+    "unit": "points",
+    "precision": 0,
+    "ties": "earliest"
   },
   "controls": {
     "player1": {

@@ -101,12 +101,15 @@ otherwise unfair to compare with older submissions.
 
 ```json
 {
-  "enabled": true,
-  "label": "Score",
-  "order": "desc",
-  "unit": "points",
-  "precision": 0,
-  "ties": "earliest"
+  "version": "1.0.0",
+  "scores": {
+    "enabled": true,
+    "label": "Score",
+    "order": "desc",
+    "unit": "points",
+    "precision": 0,
+    "ties": "earliest"
+  }
 }
 ```
 
@@ -126,6 +129,18 @@ def submit_bitcade_score(final_score):
 
 Call this once when the game is over. If the game collects a player tag itself,
 include `tag`; otherwise Bitcade should prompt for the tag after the game exits.
+The leaderboard for this game appears on the game detail page below the game
+information and launch/back buttons after scores are saved.
+
+When prompting an AI tool to build a Python/Pygame game for Bitcade, include
+this requirement if the game has scoring:
+
+```text
+Add Bitcade leaderboard support. Include a top-level scores object in
+bitcade.json and print exactly one BITCADE_SCORE JSON line to stdout when a run
+ends. Include score, display, player, and optional metadata. Use flush=True and
+do not print score events every frame.
+```
 
 ## Minimal main.py
 
