@@ -316,6 +316,8 @@ brief can say:
 Target Bitcade install: 1900x1080 safe viewport. Menu uses Arrow keys and
 Space/Enter. Player 1 uses Arrow keys, Space, Shift, and Enter. Escape held for
 3 seconds exits to the Bitcade menu. Use delta time or viewport-scaled movement.
+Put the game version in the top comment block of the main code file, and update
+that comment version whenever an AI edits or rewrites the code.
 If the game has a final score, add `scores` metadata to `bitcade.json`, update
 `version` whenever score balance changes, and submit exactly one final score
 event at the end of a run.

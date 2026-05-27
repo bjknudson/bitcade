@@ -262,6 +262,14 @@ window.Bitcade.submitScore once when the run ends with score, display, player,
 and optional metadata. Do not submit scores every frame.
 ```
 
+For any AI-generated p5.js game, include these versioning requirements:
+
+```text
+Put the game version in the top comment block of the main code file. Whenever
+you edit or rewrite the game code, update that top-comment version and keep
+bitcade.json version metadata in sync.
+```
+
 ## Step 6: Test offline
 
 Before zipping the folder, open `index.html` locally in a browser.

@@ -142,6 +142,14 @@ ends. Include score, display, player, and optional metadata. Use flush=True and
 do not print score events every frame.
 ```
 
+For any AI-generated Python/Pygame game, include these versioning requirements:
+
+```text
+Put the game version in the top comment block of the main code file. Whenever
+you edit or rewrite the game code, update that top-comment version and keep
+bitcade.json version metadata in sync.
+```
+
 ## Minimal main.py
 
 ```python

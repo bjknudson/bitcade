@@ -1179,6 +1179,8 @@ class BitcadeApp:
                 "Scale positions, collision bounds, and speed from the viewport size.",
                 "Use elapsed time or delta time for movement instead of fixed pixels per frame.",
                 "Do not use Tab as an in-game action because Bitcade/browser focus may use it.",
+                "Put the game version in the top comment block of the main code file.",
+                "Whenever an AI edits or rewrites the game code, it should update that top-comment version and keep package metadata in sync.",
                 "If the game has scoring, add a top-level scores object to bitcade.json, update version when score balance changes, and submit exactly one final score event at the end of each run.",
                 "Browser games can load /static/bitcade-score.js on Bitcade and call window.Bitcade.submitScore; Python/Pygame games can print one BITCADE_SCORE JSON line to stdout.",
             ],
@@ -1264,6 +1266,8 @@ class BitcadeApp:
                 f"Player 2 cabinet bindings: {binding_summary(cabinet_p2)}",
                 f"Cabinet exit/menu combo: hold {cabinet_combo} for {cabinet_hold} seconds.",
                 "Timing rule: use delta time or viewport-scaled movement so resizing does not change gameplay speed.",
+                "Version comment rule: include the game version in the top comment block of the main code file.",
+                "Version update rule: whenever an AI edits or rewrites the game code, update that top-comment version and keep bitcade.json version metadata in sync.",
                 "Leaderboard rule: if the game has scoring, include top-level bitcade.json scores metadata, update version when scoring changes, and submit exactly one final score event per completed run.",
                 "Browser score helper: load /static/bitcade-score.js on Bitcade and call window.Bitcade.submitScore({score, display, player, metadata}).",
                 "Python/Pygame score helper: print BITCADE_SCORE plus JSON with score, display, player, and optional metadata, using flush=True.",
@@ -1278,6 +1282,8 @@ class BitcadeApp:
             f"the cabinet exit/menu combo is {cabinet_combo} held for {cabinet_hold} seconds. "
             "Keep gameplay speed independent of resolution by using delta time or scaling movement from the viewport size. "
             "Do not rely on Tab for gameplay. "
+            "Include the game version in the top comment block of the main code file. "
+            "Whenever you edit or rewrite the game code, update that top-comment version and keep bitcade.json version metadata in sync. "
             "If the game has scoring, add Bitcade leaderboard support: include a top-level scores object in bitcade.json, keep a meaningful version and update it when scoring balance changes, and submit exactly one final score event per completed run. "
             "For browser games, load /static/bitcade-score.js on Bitcade and call window.Bitcade.submitScore({score, display, player, metadata}); for Python/Pygame games, print one BITCADE_SCORE JSON line to stdout with flush=True. "
             "Do not submit scores every frame."

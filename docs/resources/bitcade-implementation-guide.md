@@ -344,7 +344,9 @@ Example JSON export:
     "Design gameplay around the safe viewport.",
     "Scale positions, collision bounds, and speed from the viewport size.",
     "Use elapsed time or delta time for movement instead of fixed pixels per frame.",
-    "Do not use Tab as an in-game action because Bitcade/browser focus may use it."
+    "Do not use Tab as an in-game action because Bitcade/browser focus may use it.",
+    "Put the game version in the top comment block of the main code file.",
+    "Whenever an AI edits or rewrites the game code, it should update that top-comment version and keep package metadata in sync."
   ]
 }
 ```
@@ -363,7 +365,10 @@ Build this game for a Bitcade install with a 1900x1080 safe gameplay viewport.
 Use Arrow keys for movement, Space for the main action, Enter for start/select,
 and Escape held for 3 seconds to exit back to the Bitcade menu. Keep gameplay
 speed independent of resolution by using delta time or scaling movement from the
-viewport size. Do not rely on Tab for gameplay.
+viewport size. Do not rely on Tab for gameplay. Include the game version in the
+top comment block of the main code file. Whenever you edit or rewrite the game
+code, update that top-comment version and keep bitcade.json version metadata in
+sync.
 ```
 
 Bitcade should refresh the detected profile when the kiosk starts and whenever

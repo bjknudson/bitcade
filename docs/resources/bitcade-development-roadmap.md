@@ -106,6 +106,10 @@ Implementation notes:
 - Provide copy/export buttons for the local install profile as JSON, Markdown,
   and an AI prompt block that students can paste into p5.js, pygame, or other
   development environments.
+- Include version-comment guidance in the Markdown and AI prompt exports: the
+  main code file should put the game version in its top comment block, and any
+  AI edit or rewrite should update that top-comment version and keep metadata in
+  sync.
 
 Outcome: Bitcade can handle keyboard and controller-based cabinet setups more reliably.
 
