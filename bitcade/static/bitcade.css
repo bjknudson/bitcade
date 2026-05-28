@@ -158,6 +158,99 @@ textarea { min-height: 7rem; resize: vertical; }
 .play-page.layout-showcase .grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, max(24rem, var(--play-card-min, 24rem))), 1fr)); }
 .play-page.layout-showcase .game-card { display: grid; grid-template-columns: minmax(12rem, 45%) 1fr; }
 .play-page.layout-showcase .thumbnail { min-height: 100%; }
+.screensaver {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  grid-template-rows: 1fr auto;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04) 50%, rgba(0, 0, 0, 0.12) 50%),
+    radial-gradient(circle at 20% 15%, color-mix(in srgb, var(--accent) 38%, transparent), transparent 26rem),
+    radial-gradient(circle at 80% 75%, color-mix(in srgb, var(--accent-2) 30%, transparent), transparent 24rem),
+    var(--bg);
+  background-size: 100% 4px, auto, auto, auto;
+}
+.screensaver[hidden] { display: none; }
+.screensaver-grid {
+  position: absolute;
+  inset: auto -10vw -8vh;
+  height: 44vh;
+  opacity: 0.32;
+  background:
+    linear-gradient(color-mix(in srgb, var(--accent) 42%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--accent) 42%, transparent) 1px, transparent 1px);
+  background-size: 100% 2rem, 5rem 100%;
+  transform: perspective(32rem) rotateX(62deg);
+  transform-origin: bottom;
+  animation: screensaver-grid 5s linear infinite;
+}
+.screensaver-brand {
+  position: relative;
+  z-index: 1;
+  align-self: center;
+  justify-self: center;
+  width: min(72rem, calc(100vw - 3rem));
+  text-align: center;
+  animation: screensaver-float 18s ease-in-out infinite alternate;
+}
+.screensaver-brand img {
+  display: block;
+  max-width: min(18rem, 42vw);
+  max-height: 22vh;
+  margin: 0 auto 1.2rem;
+  object-fit: contain;
+  filter: drop-shadow(0 0 1.2rem color-mix(in srgb, var(--accent) 50%, transparent));
+}
+.screensaver-brand p {
+  margin: 0 0 0.4rem;
+  color: var(--accent);
+  font-size: clamp(1.2rem, 4vw, 3rem);
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.screensaver-brand h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: clamp(2rem, 8vw, 7rem);
+  line-height: 0.92;
+  text-shadow: 0 0 1.4rem color-mix(in srgb, var(--accent-2) 38%, transparent);
+}
+.screensaver-ticker {
+  position: relative;
+  z-index: 2;
+  width: 100vw;
+  padding: 0.85rem 0;
+  border-top: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  border-bottom: 2px solid color-mix(in srgb, var(--accent-2) 70%, transparent);
+  background: rgba(0, 0, 0, 0.52);
+  overflow: hidden;
+}
+.screensaver-ticker div {
+  display: inline-flex;
+  gap: 2.5rem;
+  min-width: max-content;
+  color: var(--accent-2);
+  font: 900 clamp(1rem, 2.4vw, 2rem) ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-transform: uppercase;
+  animation: screensaver-ticker var(--screensaver-ticker-speed, 28s) linear infinite;
+}
+.screensaver-ticker span { white-space: nowrap; }
+.screensaver-ticker strong { color: var(--accent); }
+@keyframes screensaver-grid {
+  from { background-position: 0 0, 0 0; }
+  to { background-position: 0 2rem, 5rem 0; }
+}
+@keyframes screensaver-float {
+  0% { transform: translate(-5vw, -4vh) scale(0.96); }
+  100% { transform: translate(5vw, 4vh) scale(1.04); }
+}
+@keyframes screensaver-ticker {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
 .branding-form .asset-preview { min-height: 6rem; display: grid; place-items: center; padding: 0.8rem; border: 1px dashed rgba(255, 255, 255, 0.24); border-radius: 0.8rem; background: rgba(0, 0, 0, 0.18); color: var(--muted); }
 .asset-preview img { max-width: 100%; max-height: 7rem; object-fit: contain; }
 .logo-fields { grid-template-columns: minmax(10rem, 14rem) minmax(12rem, 1fr); align-items: center; }

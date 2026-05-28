@@ -196,6 +196,15 @@ DEFAULT_PLAY_LAYOUT = {
     "thumbnail_ratio": "16 / 9",
 }
 
+DEFAULT_SCREENSAVER = {
+    "enabled": True,
+    "idle_seconds": 60,
+    "headline": "Bitcade",
+    "message": "Press any button to play",
+    "show_leaderboards": True,
+    "ticker_speed_seconds": 28,
+}
+
 DEFAULT_BRANDING = {
     "install_name": "Bitcade",
     "site_title": "Bitcade",
@@ -208,6 +217,7 @@ DEFAULT_BRANDING = {
     "palette": "classic",
     "colors": COLOR_PALETTES["classic"],
     "play_layout": DEFAULT_PLAY_LAYOUT,
+    "screensaver": DEFAULT_SCREENSAVER,
 }
 
 DEFAULT_CABINET_PROFILE = {
@@ -536,7 +546,7 @@ def first_form_value(form: dict[str, list[str]], key: str, default: str = "") ->
 
 
 def bool_from_form(form: dict[str, list[str]], key: str) -> bool:
-    return first_form_value(form, key) in {"1", "true", "on", "yes"}
+    return any(value in {"1", "true", "on", "yes"} for value in form.get(key, []))
 
 
 def json_list_from_text(value: str) -> list[str]:
@@ -1031,6 +1041,126 @@ def game_input_script(profile: dict[str, Any], controls: dict[str, Any], return_
 """
 
 
+def inactivity_return_script(seconds: int, return_path: str = "/play") -> str:
+    payload = {
+        "seconds": max(1, int(seconds)),
+        "returnPath": return_path,
+    }
+    return f"""
+        <script>
+        (() => {{
+          const config = {json.dumps(payload)};
+          const idleMs = Number(config.seconds || 60) * 1000;
+          let lastActivity = performance.now();
+
+          const markActivity = () => {{
+            lastActivity = performance.now();
+          }};
+
+          const attachActivityListeners = (target) => {{
+            if (!target) return;
+            for (const type of ["keydown", "keyup", "pointerdown", "pointermove", "mousedown", "mousemove", "wheel", "touchstart", "gamepadconnected"]) {{
+              target.addEventListener(type, markActivity, {{ passive: true }});
+            }}
+          }};
+
+          const attachFrameListeners = () => {{
+            const frame = document.querySelector(".game-frame");
+            if (!frame) return;
+            const attach = () => {{
+              try {{
+                attachActivityListeners(frame.contentWindow);
+                attachActivityListeners(frame.contentDocument);
+              }} catch (error) {{
+                // Browser package files are served same-origin; ignore if a game navigates elsewhere.
+              }}
+            }};
+            frame.addEventListener("load", attach);
+            attach();
+          }};
+
+          attachActivityListeners(window);
+          attachActivityListeners(document);
+          attachFrameListeners();
+
+          const poll = () => {{
+            if ("getGamepads" in navigator) {{
+              for (const gamepad of Array.from(navigator.getGamepads()).filter(Boolean)) {{
+                const buttonActive = gamepad.buttons.some((button) => button && button.pressed);
+                const axisActive = gamepad.axes.some((axis) => Math.abs(axis || 0) > 0.55);
+                if (buttonActive || axisActive) markActivity();
+              }}
+            }}
+            if (performance.now() - lastActivity >= idleMs) {{
+              window.location.href = config.returnPath;
+              return;
+            }}
+            requestAnimationFrame(poll);
+          }};
+
+          requestAnimationFrame(poll);
+        }})();
+        </script>
+"""
+
+
+def play_screensaver_script(config: dict[str, Any]) -> str:
+    payload = {
+        "enabled": bool(config.get("enabled", True)),
+        "idleSeconds": max(1, int(config.get("idle_seconds", DEFAULT_SCREENSAVER["idle_seconds"]) or DEFAULT_SCREENSAVER["idle_seconds"])),
+    }
+    return f"""
+        <script>
+        (() => {{
+          const config = {json.dumps(payload)};
+          const overlay = document.getElementById("bitcade-screensaver");
+          if (!overlay || !config.enabled) return;
+          const idleMs = Number(config.idleSeconds || 60) * 1000;
+          let lastActivity = performance.now();
+          let active = false;
+
+          const hide = () => {{
+            if (!active) return;
+            active = false;
+            overlay.hidden = true;
+            document.body.classList.remove("screensaver-active");
+          }};
+
+          const show = () => {{
+            if (active) return;
+            active = true;
+            overlay.hidden = false;
+            document.body.classList.add("screensaver-active");
+          }};
+
+          const markActivity = () => {{
+            lastActivity = performance.now();
+            hide();
+          }};
+
+          for (const type of ["keydown", "keyup", "pointerdown", "pointermove", "mousedown", "mousemove", "wheel", "touchstart", "gamepadconnected"]) {{
+            window.addEventListener(type, markActivity, {{ passive: true }});
+            document.addEventListener(type, markActivity, {{ passive: true }});
+          }}
+
+          const poll = () => {{
+            if ("getGamepads" in navigator) {{
+              for (const gamepad of Array.from(navigator.getGamepads()).filter(Boolean)) {{
+                const buttonActive = gamepad.buttons.some((button) => button && button.pressed);
+                const axisActive = gamepad.axes.some((axis) => Math.abs(axis || 0) > 0.55);
+                if (buttonActive || axisActive) markActivity();
+              }}
+            }}
+            if (!active && performance.now() - lastActivity >= idleMs) show();
+            requestAnimationFrame(poll);
+          }};
+
+          requestAnimationFrame(poll);
+        }})();
+        </script>
+"""
+
+
 class BitcadeApp:
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         load_local_env()
@@ -1212,6 +1342,9 @@ class BitcadeApp:
             play_layout = stored.get("play_layout")
             if isinstance(play_layout, dict):
                 branding["play_layout"] = {**branding["play_layout"], **play_layout}
+            screensaver = stored.get("screensaver")
+            if isinstance(screensaver, dict):
+                branding["screensaver"] = {**branding["screensaver"], **screensaver}
         if branding.get("layout") not in LAYOUT_OPTIONS:
             branding["layout"] = "arcade"
         if branding.get("palette") not in COLOR_PALETTES:
@@ -3482,6 +3615,66 @@ class BitcadeApp:
         </section>
         """
 
+    def screensaver_settings(self) -> dict[str, Any]:
+        settings = self.branding().get("screensaver", {})
+        if not isinstance(settings, dict):
+            settings = {}
+        normalized = dict(DEFAULT_SCREENSAVER)
+        normalized.update(settings)
+        try:
+            normalized["idle_seconds"] = max(5, min(600, int(normalized.get("idle_seconds", DEFAULT_SCREENSAVER["idle_seconds"]))))
+        except (TypeError, ValueError):
+            normalized["idle_seconds"] = DEFAULT_SCREENSAVER["idle_seconds"]
+        try:
+            normalized["ticker_speed_seconds"] = max(8, min(120, int(normalized.get("ticker_speed_seconds", DEFAULT_SCREENSAVER["ticker_speed_seconds"]))))
+        except (TypeError, ValueError):
+            normalized["ticker_speed_seconds"] = DEFAULT_SCREENSAVER["ticker_speed_seconds"]
+        normalized["enabled"] = bool(normalized.get("enabled", True))
+        normalized["show_leaderboards"] = bool(normalized.get("show_leaderboards", True))
+        return normalized
+
+    def render_play_screensaver(self, branding: dict[str, Any]) -> str:
+        settings = self.screensaver_settings()
+        if not settings["enabled"]:
+            return ""
+        image_path = str(branding.get("mark_path") or branding.get("logo_path") or "").strip()
+        image = f'<img src="/branding-assets/{quote(image_path)}" alt="">' if image_path else ""
+        headline = html.escape(str(settings.get("headline") or branding.get("install_name") or "Bitcade"))
+        message = html.escape(str(settings.get("message") or DEFAULT_SCREENSAVER["message"]))
+        ticker_items = []
+        if settings["show_leaderboards"]:
+            with self.connect() as conn:
+                games = self.rows_to_games(
+                    conn.execute(
+                        "SELECT * FROM games WHERE status = 'approved' AND scores_enabled = 1 ORDER BY title COLLATE NOCASE"
+                    ).fetchall()
+                )
+                for game in games:
+                    for score in self.ranked_scores_for_game(conn, game, limit=3):
+                        ticker_items.append(
+                            f"<span><strong>{html.escape(game['title'])}</strong> "
+                            f"#{int(score['rank'])} {html.escape(score['player_tag'])} "
+                            f"{html.escape(score['score_display'])}</span>"
+                        )
+        if not ticker_items:
+            ticker_items.append("<span>Local leaderboard scores will scroll here after players set records.</span>")
+        ticker = "".join(ticker_items * 2)
+        speed = int(settings["ticker_speed_seconds"])
+        return f"""
+        <section id="bitcade-screensaver" class="screensaver" aria-label="Bitcade screensaver" hidden>
+          <div class="screensaver-grid" aria-hidden="true"></div>
+          <div class="screensaver-brand">
+            {image}
+            <p>{headline}</p>
+            <h2>{message}</h2>
+          </div>
+          <div class="screensaver-ticker" style="--screensaver-ticker-speed: {speed}s">
+            <div>{ticker}</div>
+          </div>
+        </section>
+        {play_screensaver_script(settings)}
+        """
+
     def render_leaderboards(self, selected_game_id: str = "") -> bytes:
         safe_selected = safe_url_path(selected_game_id) if selected_game_id else ""
         with self.connect() as conn:
@@ -3561,12 +3754,14 @@ class BitcadeApp:
         </section>
         <section class="grid" aria-label="Approved games">{cards}</section>
         </div>
+        {screensaver}
         """.format(
             mark=mark,
             install_name=html.escape(str(branding.get("install_name") or "Bitcade")),
             tagline=html.escape(str(branding.get("tagline") or "Choose a local game")),
             welcome_text=html.escape(str(branding.get("welcome_text") or "")),
             cards="".join(cards) or '<p class="empty">No approved games yet.</p>',
+            screensaver=self.render_play_screensaver(branding),
         )
         return self.html_page("Play", body, body_class="play-page")
 
@@ -3625,8 +3820,9 @@ class BitcadeApp:
           </div>
         </section>
         {self.render_game_leaderboard_panel(game)}
+        {inactivity_return_script(self.screensaver_settings()["idle_seconds"], "/play")}
         """
-        return self.response(start_response, "200 OK", self.html_page(f"{game['title']} Info", body))
+        return self.response(start_response, "200 OK", self.html_page(f"{game['title']} Info", body, body_class="game-info-page"))
 
     def launch_game(self, start_response, game_id: str):
         with self.connect() as conn:
@@ -3648,6 +3844,7 @@ class BitcadeApp:
         </section>
         {GAME_FIT_SCRIPT}
         {game_input_script(self.cabinet_profile(), metadata.get("controls", {}), "/play")}
+        {inactivity_return_script(self.screensaver_settings()["idle_seconds"], "/play")}
         {self.score_bridge_script(game, play_session_id)}
         """
         return self.response(start_response, "200 OK", self.html_page(f"Playing {game['title']}", body, body_class="game-page", show_chrome=False))
@@ -3747,6 +3944,7 @@ class BitcadeApp:
           <a class="button" href="{html.escape(return_path)}" data-nav-start>Return</a>
         </section>
         {self.native_pending_score_script(game) if not preview else ""}
+        {inactivity_return_script(self.screensaver_settings()["idle_seconds"], return_path)}
         """
         return self.response(start_response, "200 OK", self.html_page(f"Playing {game['title']}", body, body_class="game-page native-page", show_chrome=False))
 
@@ -4491,6 +4689,26 @@ class BitcadeApp:
             normalized["hero_text_width"] = normalized["content_width"]
         return normalized
 
+    def normalize_screensaver_settings(self, form: dict[str, list[str]], current: dict[str, Any]) -> dict[str, Any]:
+        existing = current.get("screensaver", {}) if isinstance(current.get("screensaver"), dict) else {}
+        defaults = {**DEFAULT_SCREENSAVER, **existing}
+        enabled = bool_from_form(form, "screensaver_enabled") if "screensaver_enabled" in form else bool(defaults["enabled"])
+        show_leaderboards = bool_from_form(form, "screensaver_show_leaderboards") if "screensaver_show_leaderboards" in form else bool(defaults["show_leaderboards"])
+        return {
+            "enabled": enabled,
+            "idle_seconds": self.normalize_layout_number(form, "screensaver_idle_seconds", int(defaults["idle_seconds"]), 5, 600),
+            "headline": first_form_value(form, "screensaver_headline", str(defaults["headline"])).strip() or DEFAULT_SCREENSAVER["headline"],
+            "message": first_form_value(form, "screensaver_message", str(defaults["message"])).strip() or DEFAULT_SCREENSAVER["message"],
+            "show_leaderboards": show_leaderboards,
+            "ticker_speed_seconds": self.normalize_layout_number(
+                form,
+                "screensaver_ticker_speed_seconds",
+                int(defaults["ticker_speed_seconds"]),
+                8,
+                120,
+            ),
+        }
+
     def update_branding_settings(self, form: dict[str, list[str]], files: dict[str, dict[str, Any]]) -> None:
         current = self.branding()
         palette = first_form_value(form, "palette", "custom").strip() or "custom"
@@ -4516,6 +4734,7 @@ class BitcadeApp:
             "palette": palette,
             "colors": colors,
             "play_layout": self.normalize_play_layout_settings(form, current),
+            "screensaver": self.normalize_screensaver_settings(form, current),
         }
         for slot, field in (("logo", "logo"), ("mark", "mark")):
             raw_upload = files.get(field)
@@ -4542,6 +4761,7 @@ class BitcadeApp:
             for key, description in LAYOUT_OPTIONS.items()
         )
         play_layout = branding.get("play_layout", {}) if isinstance(branding.get("play_layout"), dict) else DEFAULT_PLAY_LAYOUT
+        screensaver = self.screensaver_settings()
         ratio_options = "".join(
             f'<option value="{html.escape(value)}"{" selected" if value == play_layout.get("thumbnail_ratio") else ""}>{html.escape(label)}</option>'
             for value, label in THUMBNAIL_RATIOS.items()
@@ -4618,6 +4838,25 @@ class BitcadeApp:
               <button class="button secondary" type="button" id="fit-play-screen">Fit cards to monitor</button>
             </div>
             <p id="layout-estimate" class="layout-estimate">Estimated columns will update as you edit these values.</p>
+          </section>
+          <h2>Screensaver</h2>
+          <section class="layout-tools" aria-labelledby="screensaver-tools">
+            <div class="section-heading">
+              <div>
+                <h2 id="screensaver-tools">Play-menu screensaver</h2>
+                <p>After idle time on the play menu, show moving branding and optional local leaderboard records. The same idle time returns game info and launched games to the play menu.</p>
+              </div>
+            </div>
+            <div class="checks">
+              <label><input type="hidden" name="screensaver_enabled" value="0"><input type="checkbox" name="screensaver_enabled" value="1" {"checked" if screensaver["enabled"] else ""}> Enable screensaver</label>
+              <label><input type="hidden" name="screensaver_show_leaderboards" value="0"><input type="checkbox" name="screensaver_show_leaderboards" value="1" {"checked" if screensaver["show_leaderboards"] else ""}> Show leaderboard ticker</label>
+            </div>
+            <div class="field-row">
+              <label>Idle seconds <input type="number" name="screensaver_idle_seconds" min="5" max="600" value="{html.escape(str(screensaver['idle_seconds']))}" required></label>
+              <label>Ticker speed seconds <input type="number" name="screensaver_ticker_speed_seconds" min="8" max="120" value="{html.escape(str(screensaver['ticker_speed_seconds']))}" required></label>
+            </div>
+            <label>Screensaver headline <input name="screensaver_headline" value="{html.escape(str(screensaver.get('headline', DEFAULT_SCREENSAVER['headline'])))}" required></label>
+            <label>Screensaver message <input name="screensaver_message" value="{html.escape(str(screensaver.get('message', DEFAULT_SCREENSAVER['message'])))}" required></label>
           </section>
           <h2>Color palette</h2>
           <label>Preset <select name="palette" id="palette-select">{palette_options}</select></label>

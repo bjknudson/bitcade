@@ -662,6 +662,40 @@ class ReplitReactViteWebTests(unittest.TestCase):
         self.assertIn("--play-hero-text-width: 1800px", rendered)
         self.assertIn("--play-thumbnail-ratio: 4 / 3", rendered)
 
+    def test_branding_settings_update_screensaver_config(self) -> None:
+        form = {
+            "install_name": ["Bitcade"],
+            "site_title": ["Bitcade"],
+            "tagline": ["Choose a local game"],
+            "welcome_text": ["Welcome"],
+            "student_upload_label": ["Student upload code"],
+            "layout": ["arcade"],
+            "palette": ["classic"],
+            "color_background": ["#111426"],
+            "color_panel": ["#1c2140"],
+            "color_panel_2": ["#252b52"],
+            "color_text": ["#f8fbff"],
+            "color_muted": ["#b7c1d9"],
+            "color_accent": ["#61f0c1"],
+            "color_accent_2": ["#ffcf5a"],
+            "screensaver_enabled": ["0", "1"],
+            "screensaver_show_leaderboards": ["0"],
+            "screensaver_idle_seconds": ["90"],
+            "screensaver_ticker_speed_seconds": ["42"],
+            "screensaver_headline": ["Room 12 Arcade"],
+            "screensaver_message": ["Tap start"],
+        }
+
+        self.app.update_branding_settings(form, {})
+
+        screensaver = self.app.branding()["screensaver"]
+        self.assertTrue(screensaver["enabled"])
+        self.assertFalse(screensaver["show_leaderboards"])
+        self.assertEqual(screensaver["idle_seconds"], 90)
+        self.assertEqual(screensaver["ticker_speed_seconds"], 42)
+        self.assertEqual(screensaver["headline"], "Room 12 Arcade")
+        self.assertEqual(screensaver["message"], "Tap start")
+
     def test_branding_logo_upload_is_served_when_selected(self) -> None:
         form = {
             "install_name": ["Bitcade"],
@@ -804,6 +838,38 @@ class ReplitReactViteWebTests(unittest.TestCase):
         self.assertIn("AAA", rendered)
         self.assertNotIn("Full board", rendered)
         self.assertNotIn('/leaderboards?game=score-test', rendered)
+
+    def test_play_page_includes_idle_screensaver_with_leaderboard_ticker(self) -> None:
+        self.install_score_game()
+        with self.app.connect() as conn:
+            game = conn.execute("SELECT * FROM games WHERE id = 'score-test'").fetchone()
+            self.app.record_score(conn, game, {"score_value": 125.0, "score_display": "125", "player_slot": None, "metadata": {}}, player_tag="AAA", source="game")
+
+        rendered = self.app.render_play().decode("utf-8")
+
+        self.assertIn('id="bitcade-screensaver"', rendered)
+        self.assertIn("Score Test", rendered)
+        self.assertIn("AAA", rendered)
+        self.assertIn('"idleSeconds": 60', rendered)
+        self.assertIn("screensaver-active", rendered)
+
+    def test_game_info_and_launch_pages_return_to_play_after_idle(self) -> None:
+        self.install_score_game()
+        captured, start_response = self.start_response_capture()
+
+        info_response = self.app.render_game_info(start_response, "score-test")
+        info = b"".join(info_response).decode("utf-8")
+        self.assertIn('"returnPath": "/play"', info)
+        self.assertIn('"seconds": 60', info)
+
+        captured, start_response = self.start_response_capture()
+        launch_response = self.app.launch_game(start_response, "score-test")
+        launch = b"".join(launch_response).decode("utf-8")
+
+        self.assertEqual(captured["status"], "200 OK")
+        self.assertIn('"returnPath": "/play"', launch)
+        self.assertIn('"seconds": 60', launch)
+        self.assertIn("game-frame", launch)
 
     def test_database_migration_adds_score_columns_to_existing_games_table(self) -> None:
         temp = tempfile.TemporaryDirectory()
