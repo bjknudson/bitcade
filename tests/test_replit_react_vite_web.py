@@ -8,7 +8,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from bitcade.app import BitcadeApp, REPLIT_REACT_VITE_WEB_PLATFORM, key_event_init
+from bitcade.app import BitcadeApp, REPLIT_REACT_VITE_WEB_PLATFORM, cabinet_compatibility_warnings, key_event_init
 
 
 class ReplitReactViteWebTests(unittest.TestCase):
@@ -62,6 +62,37 @@ class ReplitReactViteWebTests(unittest.TestCase):
         self.assertIn("data-capture-binding", rendered)
         self.assertIn('id="input-stream"', rendered)
         self.assertIn("Capturing next input", rendered)
+        self.assertIn('name="system_menu"', rendered)
+        self.assertNotIn('name="p2_start"', rendered)
+
+    def test_default_cabinet_profile_uses_simple_two_adapter_layout(self) -> None:
+        profile = self.app.cabinet_profile()
+
+        self.assertEqual(profile["player1"]["device"], "gamepad:0")
+        self.assertEqual(profile["player1"]["start"], "button:9")
+        self.assertEqual(profile["player2"]["device"], "gamepad:1")
+        self.assertNotIn("start", profile["player2"])
+        self.assertEqual(profile["system"]["menu"], "button:8")
+        self.assertEqual(profile["system"]["device"], "gamepad:0")
+
+    def test_legacy_cabinet_profile_loads_with_menu_combo_fallback(self) -> None:
+        legacy = {
+            "name": "Old cabinet",
+            "players": {
+                "1": {"up": "axis:1:-", "a": "button:0", "start": "button:9"},
+                "2": {"up": "axis:1:-", "a": "button:1", "start": "button:9"},
+            },
+            "system": {"menuCombo": "button:8+button:9", "holdSeconds": 2.5},
+        }
+        self.app.set_setting("cabinet_profile", json.dumps(legacy))
+
+        profile = self.app.cabinet_profile()
+
+        self.assertEqual(profile["player1"]["start"], "button:9")
+        self.assertEqual(profile["player2"]["start"], "button:9")
+        self.assertEqual(profile["system"]["menu"], "button:8")
+        self.assertEqual(profile["system"]["menuCombo"], "button:8+button:9")
+        self.assertEqual(profile["system"]["holdSeconds"], 2.5)
 
     def test_display_input_settings_has_detect_display(self) -> None:
         rendered = self.app.render_display_input_settings().decode("utf-8")
@@ -513,6 +544,23 @@ class ReplitReactViteWebTests(unittest.TestCase):
 
         profile = self.app.cabinet_profile()
         self.assertEqual(profile["system"]["menuCombo"], "axis:0:++button:9")
+
+    def test_simple_cabinet_compatibility_warnings_flag_unsupported_inputs(self) -> None:
+        warnings = cabinet_compatibility_warnings(
+            {
+                "input": {"requiresMouse": True},
+                "controls": {
+                    "player1": {"up": "ArrowUp", "a": "Space", "b": "Shift", "c": "F"},
+                    "player2": {"up": "W", "a": "F", "start": "R"},
+                    "system": {"select": "Tab"},
+                },
+            }
+        )
+
+        self.assertTrue(any("requires mouse" in warning for warning in warnings))
+        self.assertTrue(any("Player 2 Start" in warning for warning in warnings))
+        self.assertTrue(any("Select" in warning for warning in warnings))
+        self.assertTrue(any("more than two action buttons" in warning for warning in warnings))
 
     def test_install_profile_exports_include_cabinet_profile(self) -> None:
         form = {

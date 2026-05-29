@@ -97,6 +97,8 @@ DEFAULT_ADMIN_PASSWORD = "bitcade"
 PASSWORD_HASH_ITERATIONS = 210_000
 SESSION_SECONDS = 8 * 60 * 60
 VIRTUAL_CONTROLS = ("up", "down", "left", "right", "a", "b", "start")
+CABINET_PLAYER1_CONTROLS = ("up", "down", "left", "right", "a", "b", "start")
+CABINET_PLAYER2_CONTROLS = ("up", "down", "left", "right", "a", "b")
 DISPLAY_SCALING_MODES = {"fullscreen", "fit", "integer-fit", "fixed"}
 SPEED_MODELS = {"delta-time", "viewport-scaled", "fixed-pixels"}
 SCORE_ORDERS = {"asc", "desc"}
@@ -128,6 +130,7 @@ KEY_OPTIONS = (
 )
 BINDING_PATTERN = re.compile(r"^(button:\d+|axis:\d+:[+-])$")
 BINDING_TOKEN_PATTERN = re.compile(r"(button:\d+|axis:\d+:[+-])")
+DEVICE_PATTERN = re.compile(r"^gamepad:\d+$")
 
 COLOR_PALETTES = {
     "classic": {
@@ -222,28 +225,29 @@ DEFAULT_BRANDING = {
 
 DEFAULT_CABINET_PROFILE = {
     "name": "Default gamepad",
-    "players": {
-        "1": {
-            "up": "axis:1:-",
-            "down": "axis:1:+",
-            "left": "axis:0:-",
-            "right": "axis:0:+",
-            "a": "button:0",
-            "b": "button:1",
-            "start": "button:9",
-        },
-        "2": {
-            "up": "axis:1:-",
-            "down": "axis:1:+",
-            "left": "axis:0:-",
-            "right": "axis:0:+",
-            "a": "button:0",
-            "b": "button:1",
-            "start": "button:9",
-        },
+    "player1": {
+        "device": "gamepad:0",
+        "up": "axis:1:-",
+        "down": "axis:1:+",
+        "left": "axis:0:-",
+        "right": "axis:0:+",
+        "a": "button:0",
+        "b": "button:1",
+        "start": "button:9",
+    },
+    "player2": {
+        "device": "gamepad:1",
+        "up": "axis:1:-",
+        "down": "axis:1:+",
+        "left": "axis:0:-",
+        "right": "axis:0:+",
+        "a": "button:0",
+        "b": "button:1",
     },
     "system": {
-        "menuCombo": "button:8+button:9",
+        "device": "gamepad:0",
+        "menu": "button:8",
+        "menuAction": "hold",
         "holdSeconds": 2.0,
     },
 }
@@ -472,6 +476,37 @@ def normalize_score_metadata(metadata: dict[str, Any], game_dir: Path | None = N
     }
 
 
+def cabinet_compatibility_warnings(metadata: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    input_meta = metadata.get("input", {}) if isinstance(metadata.get("input"), dict) else {}
+    controls = metadata.get("controls", {}) if isinstance(metadata.get("controls"), dict) else {}
+    if input_meta.get("requiresMouse"):
+        warnings.append("This game requires mouse input and may not work in cabinet-only mode.")
+    if not any(isinstance(controls.get(player), dict) and controls[player] for player in ("player1", "player2", "shared")):
+        warnings.append("This game does not declare keyboard controls for Bitcade to translate from cabinet input.")
+
+    player1 = controls.get("player1", {}) if isinstance(controls.get("player1"), dict) else {}
+    player2 = controls.get("player2", {}) if isinstance(controls.get("player2"), dict) else {}
+    shared = controls.get("shared", {}) if isinstance(controls.get("shared"), dict) else {}
+    system = controls.get("system", {}) if isinstance(controls.get("system"), dict) else {}
+    p1_allowed = set(CABINET_PLAYER1_CONTROLS)
+    p2_allowed = set(CABINET_PLAYER2_CONTROLS)
+    p1_extra = sorted(key for key in player1.keys() if key not in p1_allowed and key != "editable")
+    p2_extra = sorted(key for key in player2.keys() if key not in p2_allowed and key != "editable")
+    if "start" in player2:
+        warnings.append("This game declares a Player 2 Start control, but this cabinet does not have a Player 2 Start button.")
+    if p1_extra or p2_extra:
+        warnings.append("This game uses controls outside the simple cabinet layout: " + ", ".join([*p1_extra, *p2_extra]))
+    if any("select" in controls_dict for controls_dict in (player1, player2, shared, system)):
+        warnings.append("This game declares Select, but this cabinet does not have a Select button.")
+    action_keys = {"a", "b"}
+    if len([key for key in player1.keys() if key not in {"up", "down", "left", "right", "start", "editable"}]) > len(action_keys):
+        warnings.append("This game uses more than two action buttons for Player 1.")
+    if len([key for key in player2.keys() if key not in {"up", "down", "left", "right", "start", "editable"}]) > len(action_keys):
+        warnings.append("This game uses more than two action buttons for Player 2.")
+    return warnings
+
+
 def normalize_player_tag(tag: str) -> str:
     normalized = re.sub(r"\s+", " ", tag.strip())
     if len(normalized) < 1 or len(normalized) > 12 or not TAG_PATTERN.fullmatch(normalized):
@@ -582,6 +617,55 @@ def key_event_init(key_name: str) -> dict[str, Any]:
     return {"key": key, "code": code, "keyCode": key_code, "which": key_code}
 
 
+def normalize_cabinet_profile(profile: dict[str, Any] | None) -> dict[str, Any]:
+    source = profile if isinstance(profile, dict) else {}
+    normalized = json.loads(json.dumps(DEFAULT_CABINET_PROFILE))
+    normalized["name"] = str(source.get("name") or normalized["name"]).strip() or normalized["name"]
+
+    legacy_players = source.get("players", {}) if isinstance(source.get("players"), dict) else {}
+
+    def source_player(new_key: str, legacy_key: str) -> dict[str, Any]:
+        value = source.get(new_key)
+        if isinstance(value, dict):
+            return value
+        value = legacy_players.get(legacy_key)
+        return value if isinstance(value, dict) else {}
+
+    def copy_player(new_key: str, legacy_key: str, controls: tuple[str, ...], fallback_device: str) -> None:
+        player = source_player(new_key, legacy_key)
+        target = normalized[new_key]
+        device = str(player.get("device") or fallback_device).strip()
+        target["device"] = device if DEVICE_PATTERN.fullmatch(device) else fallback_device
+        for control in controls:
+            value = str(player.get(control, target.get(control, ""))).strip()
+            target[control] = value
+        if new_key == "player2" and str(player.get("start", "")).strip():
+            target["start"] = str(player["start"]).strip()
+
+    copy_player("player1", "1", CABINET_PLAYER1_CONTROLS, "gamepad:0")
+    copy_player("player2", "2", CABINET_PLAYER2_CONTROLS, "gamepad:1")
+
+    system = source.get("system", {}) if isinstance(source.get("system"), dict) else {}
+    normalized["system"]["device"] = str(system.get("device") or normalized["player1"].get("device") or "gamepad:0")
+    if not DEVICE_PATTERN.fullmatch(normalized["system"]["device"]):
+        normalized["system"]["device"] = str(normalized["player1"].get("device") or "gamepad:0")
+    normalized["system"]["menu"] = str(system.get("menu") or normalized["system"]["menu"]).strip()
+    normalized["system"]["menuAction"] = str(system.get("menuAction") or "hold").strip() or "hold"
+    if str(system.get("menuCombo", "")).strip():
+        normalized["system"]["menuCombo"] = str(system["menuCombo"]).strip()
+    try:
+        hold_seconds = float(system.get("holdSeconds", normalized["system"]["holdSeconds"]))
+    except (TypeError, ValueError):
+        hold_seconds = float(DEFAULT_CABINET_PROFILE["system"]["holdSeconds"])
+    normalized["system"]["holdSeconds"] = max(0.5, min(10.0, hold_seconds))
+
+    normalized["players"] = {
+        "1": {control: normalized["player1"].get(control, "") for control in CABINET_PLAYER1_CONTROLS},
+        "2": {control: normalized["player2"].get(control, "") for control in (*CABINET_PLAYER2_CONTROLS, "start") if normalized["player2"].get(control)},
+    }
+    return normalized
+
+
 def render_markdown_reference(markdown: str) -> str:
     blocks: list[str] = []
     lines = markdown.splitlines()
@@ -687,7 +771,15 @@ def css_variable_block(branding: dict[str, Any] | None) -> str:
     return f"<style>:root {{{' '.join(declarations)}}}</style>"
 
 
-def html_page(title: str, body: str, *, body_class: str = "", show_chrome: bool = True, branding: dict[str, Any] | None = None) -> bytes:
+def html_page(
+    title: str,
+    body: str,
+    *,
+    body_class: str = "",
+    show_chrome: bool = True,
+    branding: dict[str, Any] | None = None,
+    cabinet_profile: dict[str, Any] | None = None,
+) -> bytes:
     layout_class = ""
     if branding and show_chrome:
         layout = str(branding.get("layout", "arcade"))
@@ -719,7 +811,7 @@ def html_page(title: str, body: str, *, body_class: str = "", show_chrome: bool 
 <body{body_class_attr}>{header}
   <main>{body}</main>
   {KEYBOARD_NAV_SCRIPT}
-  {GAMEPAD_NAV_SCRIPT}
+  {gamepad_nav_script(cabinet_profile or DEFAULT_CABINET_PROFILE)}
 </body>
 </html>""".encode()
 
@@ -794,6 +886,12 @@ KEYBOARD_NAV_SCRIPT = """
       element.scrollIntoView({ block: "nearest", inline: "nearest" });
     };
 
+    window.BitcadeBackAction = () => {
+      const escapeTarget = document.activeElement && document.activeElement !== document.body ? document.activeElement : window;
+      escapeTarget.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      if (history.length > 1) history.back();
+    };
+
     window.addEventListener("keydown", (event) => {
       if (isTextEntry(event.target)) return;
 
@@ -825,52 +923,108 @@ KEYBOARD_NAV_SCRIPT = """
 """
 
 
-GAMEPAD_NAV_SCRIPT = """
+def gamepad_nav_script(profile: dict[str, Any]) -> str:
+    payload = normalize_cabinet_profile(profile)
+    return f"""
   <script>
-  (() => {
+  (() => {{
     if (document.body.classList.contains("no-gamepad-nav")) return;
-    const navState = { up: false, down: false, left: false, right: false, activate: false, lastMove: 0 };
+    const config = {json.dumps(payload)};
+    const p1 = config.player1 || {{}};
+    const system = config.system || {{}};
+    const navState = {{ up: false, down: false, left: false, right: false, activate: false, back: false, menu: false, lastMove: 0, menuStartedAt: 0 }};
     let lastPoll = 0;
 
-    const sendKey = (key) => {
-      window.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
-    };
+    const deviceIndex = (device, fallback = 0) => {{
+      const match = String(device || "").match(/^gamepad:(\\d+)$/);
+      return match ? Number(match[1]) : fallback;
+    }};
 
-    const pressed = (gamepad, button) => Boolean(gamepad.buttons[button] && gamepad.buttons[button].pressed);
+    const gamepadFor = (device, gamepads, fallback = 0) => {{
+      const index = deviceIndex(device, fallback);
+      return gamepads.find((gamepad) => gamepad.index === index) || gamepads[fallback] || (gamepads.length === 1 ? gamepads[0] : null);
+    }};
 
-    const poll = (timestamp = 0) => {
-      if (timestamp - lastPoll < 100) {
+    const bindingPressed = (gamepad, binding) => {{
+      if (!gamepad || !binding) return false;
+      const parts = String(binding).split(":");
+      if (parts[0] === "button") {{
+        const button = gamepad.buttons[Number(parts[1])];
+        return Boolean(button && button.pressed);
+      }}
+      if (parts[0] === "axis") {{
+        const value = gamepad.axes[Number(parts[1])] || 0;
+        return parts[2] === "-" ? value < -0.55 : value > 0.55;
+      }}
+      return false;
+    }};
+
+    const textInputTypes = new Set(["", "date", "datetime-local", "email", "month", "number", "password", "search", "tel", "text", "time", "url", "week"]);
+    const isTextEntry = (element) => {{
+      if (!element) return false;
+      if (element.isContentEditable) return true;
+      if (element.tagName === "TEXTAREA" || element.tagName === "SELECT") return true;
+      return element.tagName === "INPUT" && textInputTypes.has((element.type || "").toLowerCase());
+    }};
+
+    const sendKey = (key) => {{
+      const target = document.activeElement && document.activeElement !== document.body ? document.activeElement : window;
+      target.dispatchEvent(new KeyboardEvent("keydown", {{ key, bubbles: true, cancelable: true }}));
+    }};
+
+    const poll = (timestamp = 0) => {{
+      if (timestamp - lastPoll < 100) {{
         requestAnimationFrame(poll);
         return;
-      }
+      }}
       lastPoll = timestamp;
-      const gamepad = navigator.getGamepads ? Array.from(navigator.getGamepads()).find(Boolean) : null;
-      if (gamepad && !document.body.classList.contains("game-page")) {
+      const gamepads = navigator.getGamepads ? Array.from(navigator.getGamepads()).filter(Boolean) : [];
+      const gamepad = gamepadFor(p1.device, gamepads, 0);
+      if (gamepad && !document.body.classList.contains("game-page")) {{
+        if (isTextEntry(document.activeElement)) {{
+          requestAnimationFrame(poll);
+          return;
+        }}
         const now = performance.now();
-        const states = {
-          up: (gamepad.axes[1] || 0) < -0.55 || pressed(gamepad, 12),
-          down: (gamepad.axes[1] || 0) > 0.55 || pressed(gamepad, 13),
-          left: (gamepad.axes[0] || 0) < -0.55 || pressed(gamepad, 14),
-          right: (gamepad.axes[0] || 0) > 0.55 || pressed(gamepad, 15),
-          activate: pressed(gamepad, 0) || pressed(gamepad, 9)
-        };
+        const states = {{
+          up: bindingPressed(gamepad, p1.up),
+          down: bindingPressed(gamepad, p1.down),
+          left: bindingPressed(gamepad, p1.left),
+          right: bindingPressed(gamepad, p1.right),
+          activate: bindingPressed(gamepad, p1.a) || bindingPressed(gamepad, p1.start),
+          back: bindingPressed(gamepad, p1.b),
+          menu: bindingPressed(gamepadFor(system.device || p1.device, gamepads, 0), system.menu)
+        }};
 
-        for (const [direction, key] of [["up", "ArrowUp"], ["down", "ArrowDown"], ["left", "ArrowLeft"], ["right", "ArrowRight"]]) {
-          if (states[direction] && (!navState[direction] || now - navState.lastMove > 260)) {
+        for (const [direction, key] of [["up", "ArrowUp"], ["down", "ArrowDown"], ["left", "ArrowLeft"], ["right", "ArrowRight"]]) {{
+          if (states[direction] && (!navState[direction] || now - navState.lastMove > 260)) {{
             sendKey(key);
             navState.lastMove = now;
-          }
+          }}
           navState[direction] = states[direction];
-        }
+        }}
 
         if (states.activate && !navState.activate) sendKey("Enter");
+        if (states.back && !navState.back) {{
+          if (window.BitcadeBackAction) window.BitcadeBackAction();
+          else sendKey("Escape");
+        }}
+        if (states.menu) {{
+          if (!navState.menuStartedAt) navState.menuStartedAt = now;
+          const holdMs = Number(system.holdSeconds || 2) * 1000;
+          if (now - navState.menuStartedAt >= holdMs) window.location.href = "/play";
+        }} else {{
+          navState.menuStartedAt = 0;
+        }}
         navState.activate = states.activate;
-      }
+        navState.back = states.back;
+        navState.menu = states.menu;
+      }}
       requestAnimationFrame(poll);
-    };
+    }};
 
     if ("getGamepads" in navigator) requestAnimationFrame(poll);
-  })();
+  }})();
   </script>
 """
 
@@ -944,15 +1098,21 @@ GAME_FIT_SCRIPT = """
 
 
 def game_input_script(profile: dict[str, Any], controls: dict[str, Any], return_path: str) -> str:
+    profile = normalize_cabinet_profile(profile)
     keymap: dict[str, dict[str, Any]] = {}
     for player_id, player_key in (("1", "player1"), ("2", "player2")):
         player_controls = controls.get(player_key)
         if not isinstance(player_controls, dict):
             continue
-        for control in VIRTUAL_CONTROLS:
+        cabinet_key = "player1" if player_id == "1" else "player2"
+        cabinet_controls = profile.get(cabinet_key, {}) if isinstance(profile.get(cabinet_key), dict) else {}
+        for control in cabinet_controls.keys():
             key_name = player_controls.get(control)
             if key_name:
                 keymap[f"p{player_id}.{control}"] = key_event_init(str(key_name))
+    shared_controls = controls.get("shared")
+    if isinstance(shared_controls, dict) and "p1.start" not in keymap and shared_controls.get("start"):
+        keymap["p1.start"] = key_event_init(str(shared_controls["start"]))
 
     payload = {
         "profile": profile,
@@ -968,6 +1128,17 @@ def game_input_script(profile: dict[str, Any], controls: dict[str, Any], return_
 
           const active = new Set();
           let comboStartedAt = 0;
+          let menuStartedAt = 0;
+
+          const deviceIndex = (device, fallback = 0) => {{
+            const match = String(device || "").match(/^gamepad:(\\d+)$/);
+            return match ? Number(match[1]) : fallback;
+          }};
+
+          const gamepadFor = (device, gamepads, fallback = 0) => {{
+            const index = deviceIndex(device, fallback);
+            return gamepads.find((gamepad) => gamepad.index === index) || gamepads[fallback] || (gamepads.length === 1 ? gamepads[0] : null);
+          }};
 
           const bindingPressed = (gamepad, binding) => {{
             if (!gamepad || !binding) return false;
@@ -1011,17 +1182,36 @@ def game_input_script(profile: dict[str, Any], controls: dict[str, Any], return_
             return gamepads.some((gamepad) => gamepad && combo.every((binding) => bindingPressed(gamepad, binding)));
           }};
 
+          const menuPressed = (gamepads) => {{
+            const system = config.profile.system || {{}};
+            const player1 = config.profile.player1 || {{}};
+            const gamepad = gamepadFor(system.device || player1.device, gamepads, 0);
+            return bindingPressed(gamepad, system.menu);
+          }};
+
           const poll = () => {{
             const gamepads = Array.from(navigator.getGamepads()).filter(Boolean);
-            const players = config.profile.players || {{}};
+            const players = {{
+              "1": config.profile.player1 || {{}},
+              "2": config.profile.player2 || {{}}
+            }};
 
             for (const [playerId, bindings] of Object.entries(players)) {{
-              const gamepad = gamepads[Number(playerId) - 1] || gamepads[0];
+              const gamepad = gamepadFor(bindings.device, gamepads, Number(playerId) - 1);
               for (const [control, binding] of Object.entries(bindings || {{}})) {{
+                if (control === "device") continue;
                 const id = `p${{playerId}}.${{control}}`;
                 const init = config.keymap[id];
                 if (init) setKey(id, bindingPressed(gamepad, binding), init);
               }}
+            }}
+
+            if (menuPressed(gamepads)) {{
+              if (!menuStartedAt) menuStartedAt = performance.now();
+              const holdMs = Number(config.profile.system?.holdSeconds || 2) * 1000;
+              if (performance.now() - menuStartedAt >= holdMs) window.location.href = config.returnPath;
+            }} else {{
+              menuStartedAt = 0;
             }}
 
             if (comboPressed(gamepads)) {{
@@ -1265,8 +1455,8 @@ class BitcadeApp:
         except (json.JSONDecodeError, ValueError):
             profile = DEFAULT_CABINET_PROFILE
         if not isinstance(profile, dict):
-            return DEFAULT_CABINET_PROFILE
-        return profile
+            return normalize_cabinet_profile(DEFAULT_CABINET_PROFILE)
+        return normalize_cabinet_profile(profile)
 
     def default_install_profile(self) -> dict[str, Any]:
         width = int(os.environ.get("BITCADE_SAFE_VIEWPORT_WIDTH", str(DEFAULT_DISPLAY_WIDTH)))
@@ -1280,11 +1470,10 @@ class BitcadeApp:
                 "targetFps": int(os.environ.get("BITCADE_TARGET_FPS", "60")),
             },
             "menuControls": {
-                "up": "ArrowUp",
-                "down": "ArrowDown",
-                "left": "ArrowLeft",
-                "right": "ArrowRight",
-                "select": ["Space", "Enter"],
+                "move": "Player 1 joystick",
+                "select": ["Player 1 A", "Player 1 Start", "Space", "Enter"],
+                "back": ["Player 1 B"],
+                "exitGame": "Hold Player 1 Menu",
             },
             "gameControls": {
                 "player1": {
@@ -1295,6 +1484,14 @@ class BitcadeApp:
                     "a": "Space",
                     "b": "Shift",
                     "start": "Enter",
+                },
+                "player2": {
+                    "up": "W",
+                    "down": "S",
+                    "left": "A",
+                    "right": "D",
+                    "a": "F",
+                    "b": "G",
                 },
                 "system": {
                     "exitToMenu": {
@@ -1352,7 +1549,14 @@ class BitcadeApp:
         return branding
 
     def html_page(self, title: str, body: str, *, body_class: str = "", show_chrome: bool = True) -> bytes:
-        return html_page(title, body, body_class=body_class, show_chrome=show_chrome, branding=self.branding())
+        return html_page(
+            title,
+            body,
+            body_class=body_class,
+            show_chrome=show_chrome,
+            branding=self.branding(),
+            cabinet_profile=self.cabinet_profile(),
+        )
 
     def install_profile_exports(self) -> dict[str, str]:
         profile = self.install_profile()
@@ -1365,10 +1569,9 @@ class BitcadeApp:
         player1 = controls.get("player1", {}) if isinstance(controls.get("player1"), dict) else {}
         system = controls.get("system", {}) if isinstance(controls.get("system"), dict) else {}
         exit_to_menu = system.get("exitToMenu", {}) if isinstance(system.get("exitToMenu"), dict) else {}
-        cabinet_players = cabinet_profile.get("players", {}) if isinstance(cabinet_profile.get("players"), dict) else {}
+        cabinet_player1 = cabinet_profile.get("player1", {}) if isinstance(cabinet_profile.get("player1"), dict) else {}
+        cabinet_player2 = cabinet_profile.get("player2", {}) if isinstance(cabinet_profile.get("player2"), dict) else {}
         cabinet_system = cabinet_profile.get("system", {}) if isinstance(cabinet_profile.get("system"), dict) else {}
-        cabinet_p1 = cabinet_players.get("1", {}) if isinstance(cabinet_players.get("1"), dict) else {}
-        cabinet_p2 = cabinet_players.get("2", {}) if isinstance(cabinet_players.get("2"), dict) else {}
         width = int(viewport.get("width") or DEFAULT_DISPLAY_WIDTH)
         height = int(viewport.get("height") or DEFAULT_DISPLAY_HEIGHT)
         exit_keys = exit_to_menu.get("keys", ["Escape"])
@@ -1377,7 +1580,8 @@ class BitcadeApp:
         hold_seconds = exit_to_menu.get("holdSeconds", 3)
         action = player1.get("a", "Space")
         start = player1.get("start", "Enter")
-        cabinet_combo = cabinet_system.get("menuCombo", "button:8+button:9")
+        cabinet_menu = cabinet_system.get("menu", "button:8")
+        cabinet_combo = cabinet_system.get("menuCombo", "")
         cabinet_hold = cabinet_system.get("holdSeconds", hold_seconds)
 
         def binding_summary(bindings: dict[str, Any]) -> str:
@@ -1392,12 +1596,14 @@ class BitcadeApp:
             [
                 f"Bitcade target viewport: {width}x{height}",
                 "Menu controls: Arrow keys move focus; Space or Enter selects.",
+                "Cabinet menu controls: Player 1 joystick moves focus; Player 1 A or Start selects; Player 1 B goes back.",
                 f"Player 1 controls: Arrow keys move; {action} is the main action; {start} starts/selects.",
                 f"Exit behavior: hold {' + '.join(str(key) for key in exit_keys)} for {hold_seconds} seconds to return to the Bitcade menu.",
                 f"Cabinet profile: {cabinet_profile.get('name', 'Default gamepad')}",
-                f"Player 1 cabinet bindings: {binding_summary(cabinet_p1)}",
-                f"Player 2 cabinet bindings: {binding_summary(cabinet_p2)}",
-                f"Cabinet exit/menu combo: hold {cabinet_combo} for {cabinet_hold} seconds.",
+                f"Player 1 cabinet bindings: {binding_summary(cabinet_player1)}",
+                f"Player 2 cabinet bindings: {binding_summary(cabinet_player2)}",
+                f"Cabinet exit/menu: hold {cabinet_menu} on {cabinet_system.get('device', cabinet_player1.get('device', 'gamepad:0'))} for {cabinet_hold} seconds.",
+                f"Legacy cabinet exit/menu combo: {cabinet_combo or 'not configured'}.",
                 "Timing rule: use delta time or viewport-scaled movement so resizing does not change gameplay speed.",
                 "Version comment rule: include the game version in the top comment block of the main code file.",
                 "Version update rule: whenever an AI edits or rewrites the game code, update that top-comment version and keep bitcade.json version metadata in sync.",
@@ -1411,8 +1617,9 @@ class BitcadeApp:
             f"Use Arrow keys for movement, {action} for the main action, {start} for start/select, "
             f"and {' + '.join(str(key) for key in exit_keys)} held for {hold_seconds} seconds to exit back to the Bitcade menu. "
             f"The saved cabinet profile is {cabinet_profile.get('name', 'Default gamepad')}: "
-            f"Player 1 bindings are {binding_summary(cabinet_p1)}; Player 2 bindings are {binding_summary(cabinet_p2)}; "
-            f"the cabinet exit/menu combo is {cabinet_combo} held for {cabinet_hold} seconds. "
+            f"Player 1 bindings are {binding_summary(cabinet_player1)}; Player 2 bindings are {binding_summary(cabinet_player2)}; "
+            f"the cabinet exit/menu button is {cabinet_menu} on {cabinet_system.get('device', cabinet_player1.get('device', 'gamepad:0'))} held for {cabinet_hold} seconds. "
+            f"Legacy cabinet exit/menu combo fallback: {cabinet_combo or 'not configured'}. "
             "Keep gameplay speed independent of resolution by using delta time or scaling movement from the viewport size. "
             "Do not rely on Tab for gameplay. "
             "Include the game version in the top comment block of the main code file. "
@@ -2729,7 +2936,7 @@ class BitcadeApp:
     def infer_replit_vite_controls(self, artifact_root: Path) -> tuple[dict[str, Any], list[str]]:
         controls: dict[str, Any] = {
             "player1": {"up": "ArrowUp", "down": "ArrowDown", "left": "ArrowLeft", "right": "ArrowRight", "a": "Space", "b": "Shift", "start": "Enter"},
-            "player2": {"up": "W", "down": "S", "left": "A", "right": "D", "a": "F", "b": "G", "start": "R"},
+            "player2": {"up": "W", "down": "S", "left": "A", "right": "D", "a": "F", "b": "G"},
             "system": {"exit": "Escape", "menu": "Escape"},
             "editable": True,
         }
@@ -2815,7 +3022,6 @@ class BitcadeApp:
                 "right": key("p2_right", "D"),
                 "a": key("p2_a", "W"),
                 "b": key("p2_b", "G"),
-                "start": key("p2_start", "R"),
             }
 
         return {
@@ -3793,6 +3999,7 @@ class BitcadeApp:
         if row is None:
             return self.not_found(start_response)
         game = self.rows_to_games([row])[0]
+        metadata = read_metadata(self.games_dir / game_id)
         badges = [html.escape(game["platform"]), f"{game['min_players']}-{game['max_players']} players"]
         if game["requires_keyboard"]:
             badges.append("Keyboard")
@@ -3819,10 +4026,30 @@ class BitcadeApp:
             </div>
           </div>
         </section>
+        {self.render_cabinet_controls_panel(metadata)}
         {self.render_game_leaderboard_panel(game)}
         {inactivity_return_script(self.screensaver_settings()["idle_seconds"], "/play")}
         """
         return self.response(start_response, "200 OK", self.html_page(f"{game['title']} Info", body, body_class="game-info-page"))
+
+    def render_cabinet_controls_panel(self, metadata: dict[str, Any]) -> str:
+        controls = metadata.get("controls", {}) if isinstance(metadata.get("controls"), dict) else {}
+        player2 = controls.get("player2", {}) if isinstance(controls.get("player2"), dict) else {}
+        p2_rows = ""
+        if player2:
+            p2_rows = """
+              <li><strong>Player 2:</strong> Joystick = Move; A = Action; B = Secondary</li>
+            """
+        return f"""
+        <section class="panel">
+          <h2>Cabinet controls</h2>
+          <ul>
+            <li><strong>Player 1:</strong> Joystick = Move; A = Jump / Action; B = Dash / Secondary; Start = Start / Pause</li>
+            {p2_rows}
+            <li><strong>System:</strong> Hold Menu = Exit to Bitcade</li>
+          </ul>
+        </section>
+        """
 
     def launch_game(self, start_response, game_id: str):
         with self.connect() as conn:
@@ -4184,7 +4411,6 @@ class BitcadeApp:
             {self.render_key_select("p2_right", "Right", "D")}
             {self.render_key_select("p2_a", "Main action", "W")}
             {self.render_key_select("p2_b", "Second action", "G")}
-            {self.render_key_select("p2_start", "Start", "R")}
           </div>
           <h2>System controls</h2>
           <div class="field-row">
@@ -4467,41 +4693,45 @@ class BitcadeApp:
 
     def render_gamepad_input_settings(self, message: str = "", level: str = "info") -> bytes:
         profile = self.cabinet_profile()
-        players = profile.get("players", {})
+        player1 = profile.get("player1", {}) if isinstance(profile.get("player1"), dict) else {}
+        player2 = profile.get("player2", {}) if isinstance(profile.get("player2"), dict) else {}
         system = profile.get("system", {})
         alert = f'<p class="notice {html.escape(level)}">{html.escape(message)}</p>' if message else ""
 
-        def value(player: str, control: str) -> str:
-            player_profile = players.get(player, {}) if isinstance(players, dict) else {}
-            if not isinstance(player_profile, dict):
-                return ""
+        def value(player_profile: dict[str, Any], control: str) -> str:
             return html.escape(str(player_profile.get(control, "")))
 
-        def player_fields(player: str) -> str:
+        def player_fields(player: str, player_profile: dict[str, Any], controls: tuple[str, ...]) -> str:
             labels = []
-            for control in VIRTUAL_CONTROLS:
-                labels.append(f'<label>{player.upper()} {control.title()} <input data-capture-binding name="{player}_{control}" value="{value(player[-1], control)}"></label>')
+            for control in controls:
+                label = "Joystick " + control if control in {"up", "down", "left", "right"} else control.title()
+                labels.append(f'<label>{player.upper()} {label} <input data-capture-binding data-player="{player}" name="{player}_{control}" value="{value(player_profile, control)}"></label>')
             return "".join(labels)
 
+        system_device = html.escape(str(system.get("device", player1.get("device", "gamepad:0"))))
         body = f"""
         <section class="hero compact">
           <p class="eyebrow">Phase 4 input</p>
           <h1>Gamepad mapping</h1>
-          <p>Focus a binding field, then press a controller button or move an axis to capture it.</p>
+          <p>Player 1 controls Bitcade menus and system actions. Player 2 is gameplay-only. Hold Player 1 Menu to exit a game.</p>
         </section>
         {alert}
         <div class="input-workspace">
           <form class="panel edit-form input-profile-form" action="/admin/input" method="post">
             <label>Profile name <input name="profile_name" value="{html.escape(str(profile.get('name', 'Default gamepad')))}"></label>
             <h2>Player 1</h2>
-            <div class="field-row input-map">{player_fields('p1')}</div>
+            <label>Player 1 device <input id="p1-device" name="p1_device" value="{html.escape(str(player1.get('device', 'gamepad:0')))}"></label>
+            <div class="field-row input-map">{player_fields('p1', player1, CABINET_PLAYER1_CONTROLS)}</div>
             <h2>Player 2</h2>
-            <div class="field-row input-map">{player_fields('p2')}</div>
+            <label>Player 2 device <input id="p2-device" name="p2_device" value="{html.escape(str(player2.get('device', 'gamepad:1')))}"></label>
+            <div class="field-row input-map">{player_fields('p2', player2, CABINET_PLAYER2_CONTROLS)}</div>
             <h2>System</h2>
             <div class="field-row">
-              <label>Menu combo <input data-capture-binding name="menu_combo" value="{html.escape(str(system.get('menuCombo', 'button:8+button:9')))}"></label>
+              <label>System device <input id="system-device" name="system_device" value="{system_device}"></label>
+              <label>Player 1 Menu <input data-capture-binding data-player="system" name="system_menu" value="{html.escape(str(system.get('menu', 'button:8')))}"></label>
               <label>Hold seconds <input type="number" step="0.25" min="0.5" max="10" name="hold_seconds" value="{html.escape(str(system.get('holdSeconds', 2.0)))}"></label>
             </div>
+            <input type="hidden" name="menu_combo" value="{html.escape(str(system.get('menuCombo', '')))}">
             <p id="capture-status">Select a binding field to capture the next controller input.</p>
             <p>Bindings use <code>button:N</code>, <code>axis:N:-</code>, or <code>axis:N:+</code>. Combos join bindings with <code>+</code>.</p>
             <div class="form-actions">
@@ -4524,6 +4754,9 @@ class BitcadeApp:
           const captureStatus = document.getElementById("capture-status");
           const list = document.getElementById("gamepad-list");
           const stream = document.getElementById("input-stream");
+          const p1Device = document.getElementById("p1-device");
+          const p2Device = document.getElementById("p2-device");
+          const systemDevice = document.getElementById("system-device");
           const captureFields = Array.from(document.querySelectorAll("[data-capture-binding]"));
           const previous = new Set();
           const recent = [];
@@ -4576,6 +4809,10 @@ class BitcadeApp:
             pushRecent(binding, gamepad);
             if (!activeField) return;
             activeField.value = binding;
+            const device = `gamepad:${{gamepad.index}}`;
+            if (activeField.dataset.player === "p1" && p1Device) p1Device.value = device;
+            if (activeField.dataset.player === "p2" && p2Device) p2Device.value = device;
+            if (activeField.dataset.player === "system" && systemDevice) systemDevice.value = device;
             activeField.focus();
             activeField.select();
             activeField = null;
@@ -4598,6 +4835,8 @@ class BitcadeApp:
             list.innerHTML = "";
             if (gamepads.length === 0) {{
               status.textContent = "Press a button on a connected controller.";
+            }} else if (gamepads.length === 1) {{
+              status.textContent = "1 controller detected. Player 2 can be mapped later when its adapter is connected.";
             }} else {{
               status.textContent = `${{gamepads.length}} controller${{gamepads.length === 1 ? "" : "s"}} detected.`;
             }}
@@ -4924,6 +5163,13 @@ class BitcadeApp:
         hold_seconds = float(first_form_value(form, "hold_seconds", "2"))
         if hold_seconds < 0.5 or hold_seconds > 10:
             raise ValueError("Hold seconds must be between 0.5 and 10.")
+
+        def validate_device(value: str, label: str, fallback: str) -> str:
+            device = value.strip() or fallback
+            if not DEVICE_PATTERN.fullmatch(device):
+                raise ValueError(f"{label} must use gamepad:N.")
+            return device
+
         def validate_binding(value: str, label: str) -> str:
             binding = value.strip()
             if not binding:
@@ -4961,21 +5207,30 @@ class BitcadeApp:
 
         profile = {
             "name": first_form_value(form, "profile_name", "Default gamepad").strip() or "Default gamepad",
-            "players": {
-                "1": {
+            "player1": {
+                "device": validate_device(first_form_value(form, "p1_device"), "Player 1 device", "gamepad:0"),
+                **{
                     control: validate_binding(first_form_value(form, f"p1_{control}"), f"Player 1 {control}")
-                    for control in VIRTUAL_CONTROLS
+                    for control in CABINET_PLAYER1_CONTROLS
                 },
-                "2": {
+            },
+            "player2": {
+                "device": validate_device(first_form_value(form, "p2_device"), "Player 2 device", "gamepad:1"),
+                **{
                     control: validate_binding(first_form_value(form, f"p2_{control}"), f"Player 2 {control}")
-                    for control in VIRTUAL_CONTROLS
+                    for control in CABINET_PLAYER2_CONTROLS
                 },
             },
             "system": {
-                "menuCombo": validate_combo(first_form_value(form, "menu_combo", "button:8+button:9"), "Menu combo"),
+                "device": validate_device(first_form_value(form, "system_device"), "System device", first_form_value(form, "p1_device", "gamepad:0")),
+                "menu": validate_binding(first_form_value(form, "system_menu", "button:8"), "Player 1 Menu"),
+                "menuAction": "hold",
                 "holdSeconds": hold_seconds,
             },
         }
+        legacy_combo = validate_combo(first_form_value(form, "menu_combo"), "Legacy menu combo")
+        if legacy_combo:
+            profile["system"]["menuCombo"] = legacy_combo
         self.set_setting("cabinet_profile", json.dumps(profile))
 
     def update_install_profile(self, form: dict[str, list[str]]) -> None:
@@ -5020,6 +5275,7 @@ class BitcadeApp:
         game = self.rows_to_games([row])[0]
         metadata = read_metadata(self.games_dir / game_id)
         diagnostics_panel = self.render_import_diagnostics(metadata)
+        compatibility_panel = self.render_cabinet_compatibility_panel(metadata)
         platform_options = "".join(
             f'<option value="{html.escape(platform)}"{" selected" if platform == game["platform"] else ""}>{html.escape(platform)}</option>'
             for platform in sorted(SUPPORTED_PLATFORMS)
@@ -5054,6 +5310,7 @@ class BitcadeApp:
           <p>Update display metadata before approving the game for the arcade menu.</p>
         </section>
         {diagnostics_panel}
+        {compatibility_panel}
         <form class="panel edit-form" action="/admin/games/{html.escape(game['id'])}/edit" method="post" enctype="multipart/form-data">
           <div class="thumbnail-edit">
             {thumbnail_preview}
@@ -5108,6 +5365,23 @@ class BitcadeApp:
         </form>
         """
         return self.html_page("Edit Game", body)
+
+    def render_cabinet_compatibility_panel(self, metadata: dict[str, Any]) -> str:
+        warnings = cabinet_compatibility_warnings(metadata)
+        if not warnings:
+            return """
+        <section class="panel">
+          <h2>Cabinet compatibility</h2>
+          <p>This game fits the simple cabinet input layout.</p>
+        </section>
+        """
+        warning_html = "<ul>" + "".join(f"<li>{html.escape(warning)}</li>" for warning in warnings) + "</ul>"
+        return f"""
+        <section class="panel">
+          <h2>Cabinet compatibility warnings</h2>
+          {warning_html}
+        </section>
+        """
 
     def render_import_diagnostics(self, metadata: dict[str, Any]) -> str:
         diagnostics = metadata.get("importDiagnostics")
