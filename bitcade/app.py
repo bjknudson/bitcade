@@ -889,7 +889,8 @@ KEYBOARD_NAV_SCRIPT = """
     window.BitcadeBackAction = () => {
       const escapeTarget = document.activeElement && document.activeElement !== document.body ? document.activeElement : window;
       escapeTarget.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
-      if (history.length > 1) history.back();
+      const target = document.body.dataset.cabinetBack || document.querySelector("[data-cabinet-back]")?.dataset.cabinetBack || "";
+      if (/^\\/play(?:$|[/?#])/.test(target)) window.location.href = target;
     };
 
     window.addEventListener("keydown", (event) => {
@@ -3911,6 +3912,7 @@ class BitcadeApp:
         else:
             board = '<p class="empty">No approved games have leaderboards enabled yet.</p>'
         body = f"""
+        <span data-cabinet-back="/play" hidden></span>
         <section class="hero compact">
           <p class="eyebrow">Phase 5</p>
           <h1>Leaderboards</h1>
@@ -4011,6 +4013,7 @@ class BitcadeApp:
         if game.get("display_width") and game.get("display_height"):
             display = f"<p>Designed for {game['display_width']}x{game['display_height']} with {html.escape(game['speed_model'])} movement.</p>"
         body = f"""
+        <span data-cabinet-back="/play" hidden></span>
         <section class="game-info">
           {self.render_thumbnail(game, large=True)}
           <div class="game-info-body">

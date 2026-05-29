@@ -806,6 +806,21 @@ class ReplitReactViteWebTests(unittest.TestCase):
         )
         return captured, json.loads(b"".join(response).decode("utf-8"))
 
+    def test_cabinet_back_uses_explicit_bitcade_targets_not_browser_history(self) -> None:
+        shell = self.app.html_page("Test", "").decode("utf-8")
+        play = self.app.render_play().decode("utf-8")
+        leaderboards = self.app.render_leaderboards().decode("utf-8")
+        self.install_score_game()
+        captured, start_response = self.start_response_capture()
+        game_info = b"".join(self.app.render_game_info(start_response, "score-test")).decode("utf-8")
+
+        self.assertNotIn("history.back", shell)
+        self.assertNotIn('<span data-cabinet-back="/play"', play)
+        self.assertIn('data-cabinet-back="/play"', leaderboards)
+        self.assertIn('data-cabinet-back="/play"', game_info)
+        self.assertNotIn('data-cabinet-back="/admin"', shell + play + leaderboards + game_info)
+        self.assertNotIn('data-cabinet-back="/student"', shell + play + leaderboards + game_info)
+
     def test_score_metadata_is_stored_for_uploaded_games(self) -> None:
         self.install_score_game(order="asc")
 
